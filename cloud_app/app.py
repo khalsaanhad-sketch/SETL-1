@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, Request
+from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
@@ -19,6 +19,7 @@ templates = Jinja2Templates(directory="cloud_app/templates")
 
 sessions = {}
 
+
 def ensure_session(sid):
     if sid not in sessions:
         sessions[sid] = {
@@ -26,19 +27,22 @@ def ensure_session(sid):
             "longitude": 77.41,
             "altitude_ft": 5000,
             "speed_kts": 100,
-            "heading_deg": 90
+            "heading_deg": 90,
         }
     return sessions[sid]
+
 
 @app.get("/")
 def home(request: Request):
     return templates.TemplateResponse(request, "index.html")
+
 
 @app.get("/api/session")
 def create_session():
     sid = str(uuid.uuid4())
     ensure_session(sid)
     return {"session_id": sid}
+
 
 @app.post("/api/live-state/{sid}")
 async def update_state(sid: str, request: Request):
@@ -47,13 +51,14 @@ async def update_state(sid: str, request: Request):
     state.update(data)
     return {"ok": True}
 
+
 @app.websocket("/ws/{sid}")
 async def ws_endpoint(ws: WebSocket, sid: str):
     await ws.accept()
     state = ensure_session(sid)
 
-    while True:
-        try:
+    try:
+        while True:
             terrain = await get_terrain(state["latitude"], state["longitude"])
             weather = await get_weather(state["latitude"], state["longitude"])
 
@@ -69,12 +74,15 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 "probabilistic": prob,
                 "options": options,
                 "terrain": terrain,
-                "weather": weather
+                "weather": weather,
             }
 
             await ws.send_json(result)
+            await asyncio.sleep(1.5)
 
-        except Exception as e:
-            print("Error:", e)
-
-        await asyncio.sleep(1.5)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        sessions.pop(sid, None)
