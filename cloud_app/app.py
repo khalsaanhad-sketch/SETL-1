@@ -35,46 +35,84 @@ def ensure_session(sid):
     return sessions[sid]
 
 
-# 🔥 Backend-driven grid (safe version)
 def generate_cells(state, terrain, prob):
-    lat = state["latitude"]
-    lon = state["longitude"]
+    lat      = state["latitude"]
+    lon      = state["longitude"]
+    is_water = terrain.get("is_water", False)
+    # slope_deg is derived by terrain_engine from DEM data
+    base_slope = terrain.get("slope_deg", 0.0)
+    elev       = terrain.get("elevation_m", 0.0)
 
     cells = []
-    size = 0.01
-
-    base_slope = terrain.get("slope", 0)
+    size  = 0.01
 
     for i in range(-4, 5):
         for j in range(-4, 5):
             cell_lat = lat + i * size
             cell_lon = lon + j * size
 
-            slope = base_slope + random.uniform(-0.2, 0.2)
-            slope = max(0, slope)
+            if is_water:
+                # Ocean / water body — ditching is always high-risk
+                # Vary depth slightly for visual texture
+                local_depth = abs(elev) + random.uniform(-150, 150)
+                local_depth = max(0, local_depth)
 
-            risk = min(1.0, slope + (1 - prob))
+                # Risk: water is always dangerous; deeper = slightly worse
+                risk = round(min(1.0, max(0.75, 1.0 - prob * 0.25)), 2)
 
-            if risk > 0.6:
-                color = "#ba2627"
-            elif risk > 0.3:
-                color = "#ff9c00"
-            else:
-                color = "#2cb64f"
+                # Blue depth palette
+                if local_depth < 50:
+                    color = "#06b6d4"   # shallow coastal — cyan
+                elif local_depth < 500:
+                    color = "#0284c7"   # continental shelf — sky blue
+                elif local_depth < 2000:
+                    color = "#1d4ed8"   # mid ocean — blue
+                else:
+                    color = "#1e3a5f"   # deep ocean — navy
 
-            cells.append(
-                {
+                cells.append({
                     "corners": [
-                        [cell_lat, cell_lon],
+                        [cell_lat,        cell_lon],
                         [cell_lat + size, cell_lon],
                         [cell_lat + size, cell_lon + size],
-                        [cell_lat, cell_lon + size],
+                        [cell_lat,        cell_lon + size],
                     ],
-                    "risk": round(risk, 2),
-                    "color": color,
-                    "slope": round(slope, 2),
-                }
-            )
+                    "risk":     risk,
+                    "color":    color,
+                    "slope":    0.0,
+                    "is_water": True,
+                    "depth_m":  round(local_depth, 0),
+                })
+            else:
+                # Land — slope_deg from terrain engine, normalised to [0, 1]
+                slope = max(0.0, base_slope + random.uniform(-1.0, 1.0))
+
+                # Slope contribution: 0° = 0.0, 30° = 1.0
+                slope_risk = min(1.0, slope / 30.0)
+                # Combine probability failure with slope hazard
+                risk = round(min(1.0, (1.0 - prob) * 0.7 + slope_risk * 0.3), 2)
+
+                if risk > 0.6:
+                    color = "#ba2627"
+                elif risk > 0.45:
+                    color = "#ff9c00"
+                elif risk > 0.25:
+                    color = "#d8d62b"
+                else:
+                    color = "#2cb64f"
+
+                cells.append({
+                    "corners": [
+                        [cell_lat,        cell_lon],
+                        [cell_lat + size, cell_lon],
+                        [cell_lat + size, cell_lon + size],
+                        [cell_lat,        cell_lon + size],
+                    ],
+                    "risk":     risk,
+                    "color":    color,
+                    "slope":    round(slope, 2),
+                    "is_water": False,
+                })
 
     return cells
 

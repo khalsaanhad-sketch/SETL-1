@@ -236,6 +236,10 @@ function draw(data) {
   // Derive overall failure risk from probabilistic engine
   const failRisk = data.probabilistic ? data.probabilistic.failure : 0.3;
 
+  // Extract terrain and weather early — needed throughout draw()
+  const terrain = data.terrain || {};
+  const weather = data.weather || {};
+
   // ── Risk grid: use backend cells if present, else compute client-side ──────
   terrainLayer.clearLayers();
   lzLayer.clearLayers();
@@ -245,29 +249,35 @@ function draw(data) {
     : computeGrid(currentLat, currentLon, failRisk);
 
   cells.forEach((cell) => {
-    const groundSafety = cell.ground_safety != null ? cell.ground_safety : Math.round((1 - cell.risk) * 100) / 100;
-    const slope        = cell.slope_deg    != null ? cell.slope_deg    : (cell.slope != null ? cell.slope : "--");
-    const obstacle     = cell.obstacle     != null ? cell.obstacle     : (cell.risk > 0.6 ? "Possible" : "None");
+    let tipHtml;
+    if (cell.is_water) {
+      const depth = cell.depth_m != null ? cell.depth_m : Math.abs(terrain.elevation_m || 0);
+      tipHtml = `<strong>Water / Ocean</strong><br>Depth ~${depth} m<br>Risk ${cell.risk}<br><em>Ditching required</em>`;
+    } else {
+      const groundSafety = cell.ground_safety != null ? cell.ground_safety : Math.round((1 - cell.risk) * 100) / 100;
+      const slope        = cell.slope_deg != null ? cell.slope_deg : (cell.slope != null ? cell.slope : "--");
+      const obstacle     = cell.obstacle  != null ? cell.obstacle  : (cell.risk > 0.6 ? "Possible" : "None");
+      tipHtml = `Risk ${cell.risk}<br>Ground ${groundSafety}<br>Slope ${slope}°<br>Obstacle ${obstacle}`;
+    }
 
     L.polygon(cell.corners, {
       color:       cell.color,
       fillColor:   cell.color,
-      fillOpacity: 0.28,
-      opacity:     0.85,
+      fillOpacity: cell.is_water ? 0.32 : 0.28,
+      opacity:     0.90,
       weight:      1,
     })
       .addTo(terrainLayer)
-      .bindTooltip(
-        `Risk ${cell.risk}<br>Ground ${groundSafety}<br>Slope ${slope}°<br>Obstacle ${obstacle}`,
-        { className: "terrain-tip" }
-      );
+      .bindTooltip(tipHtml, { className: "terrain-tip" });
   });
 
-  // ── Landing zones (3 safest cells) ────────────────────────────────────────
-  const sorted = [...cells].sort((a, b) => a.risk - b.risk);
-  const lzLabels = ["Primary LZ", "Secondary LZ", "Emergency LZ"];
+  // ── Landing zones — land cells only (3 safest) ────────────────────────────
+  const landCells   = cells.filter((c) => !c.is_water);
+  const waterCells  = cells.filter((c) => c.is_water);
+  const sortedLand  = [...landCells].sort((a, b) => a.risk - b.risk);
+  const lzLabels    = ["Primary LZ", "Secondary LZ", "Emergency LZ"];
 
-  sorted.slice(0, 3).forEach((cell) => {
+  sortedLand.slice(0, 3).forEach((cell) => {
     L.polygon(cell.corners, {
       color:       "#80ffdb",
       weight:      2,
@@ -279,22 +289,42 @@ function draw(data) {
   // ── Zones panel ────────────────────────────────────────────────────────────
   const zonesEl = document.getElementById("zones");
   zonesEl.innerHTML = "";
-  sorted.slice(0, 3).forEach((cell, i) => {
-    const div = document.createElement("div");
-    div.className = "lz-item";
-    div.innerHTML = `<strong>${lzLabels[i]}</strong><span>Risk ${cell.risk}</span>`;
-    zonesEl.appendChild(div);
-  });
+
+  if (terrain.is_water) {
+    const diveWarn = document.createElement("div");
+    diveWarn.className = "lz-item";
+    diveWarn.style.color = "#60a5fa";
+    diveWarn.innerHTML = `<strong>DITCHING AREA</strong><span>Water — no land LZ found</span>`;
+    zonesEl.appendChild(diveWarn);
+  } else if (!sortedLand.length) {
+    const none = document.createElement("div");
+    none.className = "lz-item";
+    none.innerHTML = `<strong>No viable LZ</strong><span>All terrain high-risk</span>`;
+    zonesEl.appendChild(none);
+  } else {
+    sortedLand.slice(0, 3).forEach((cell, i) => {
+      const div = document.createElement("div");
+      div.className = "lz-item";
+      div.innerHTML = `<strong>${lzLabels[i]}</strong><span>Risk ${cell.risk}</span>`;
+      zonesEl.appendChild(div);
+    });
+  }
 
   // ── Decision panel ─────────────────────────────────────────────────────────
-  const recommended  = (data.options || []).find((o) => o.recommended);
-  const decisionTitle =
-    recommended
-      ? recommended.description
-      : data.alerts?.[0]?.message || "Monitoring situation...";
-  const decisionReason = recommended
-    ? `Success probability: ${Math.round((recommended.success_probability || 0) * 100)}%`
-    : `Risk level: ${Math.round(failRisk * 100)}%`;
+  const isOcean     = terrain.is_water;
+  const recommended = (data.options || []).find((o) => o.recommended);
+
+  let decisionTitle, decisionReason;
+  if (isOcean) {
+    decisionTitle  = "DITCHING ADVISORY — Water terrain detected";
+    decisionReason = `Surface: ${terrain.surface_type || "ocean"} | Elev: ${terrain.elevation_m ?? "--"} m`;
+  } else if (recommended) {
+    decisionTitle  = recommended.description;
+    decisionReason = `Success probability: ${Math.round((recommended.success_probability || 0) * 100)}%`;
+  } else {
+    decisionTitle  = data.alerts?.[0]?.message || "Monitoring situation...";
+    decisionReason = `Risk level: ${Math.round(failRisk * 100)}%`;
+  }
 
   document.getElementById("decisionBox").innerHTML =
     `<strong>${esc(decisionTitle)}</strong><br>${esc(decisionReason)}`;
@@ -310,15 +340,18 @@ function draw(data) {
     data.alerts?.[0]?.severity || "--";
 
   // ── Layers panel ───────────────────────────────────────────────────────────
-  const terrain   = data.terrain || {};
-  const weather   = data.weather || {};
-  const layersEl  = document.getElementById("layers");
+  const layersEl = document.getElementById("layers");
   layersEl.innerHTML = "";
+
+  const elevLabel = terrain.is_water
+    ? (terrain.elevation_m != null ? `${Math.abs(Math.round(terrain.elevation_m))} m depth` : "--")
+    : (terrain.elevation_m != null ? `${Math.round(terrain.elevation_m)} m` : "--");
 
   const layerRows = [
     ["Surface Type",   terrain.surface_type ?? "--"],
-    ["Elevation",      terrain.elevation_m != null ? `${Math.round(terrain.elevation_m)} m` : "--"],
-    ["Slope",          terrain.slope_deg != null ? `${terrain.slope_deg}°` : "--"],
+    [terrain.is_water ? "Depth" : "Elevation", elevLabel],
+    ["Slope",          terrain.is_water ? "0° (water)" : (terrain.slope_deg != null ? `${terrain.slope_deg}°` : "--")],
+    ["Landing",        terrain.landing_viable === false ? "Not viable" : (terrain.landing_viable ? "Viable" : "--")],
     ["Wind",           weather.wind_speed_kts != null ? `${weather.wind_speed_kts} kt / ${weather.wind_direction_deg}°` : "--"],
     ["Visibility",     weather.visibility_m  != null ? `${(weather.visibility_m / 1000).toFixed(1)} km` : "--"],
     ["Precipitation",  weather.precipitation_mm != null ? `${weather.precipitation_mm} mm` : "--"],
