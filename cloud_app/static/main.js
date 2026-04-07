@@ -553,32 +553,59 @@ function connectWS() {
 }
 
 // ── Location search via Nominatim ─────────────────────────────────────────────
+// For aviation use, the airport is always the reference point.
+// We query "{query} airport" and the plain query in parallel, then pick the
+// airport result if Nominatim identifies it as an aeroway/aerodrome.
 async function searchLocation(query) {
   query = (query || "").trim();
   if (!query) return;
   const notice = document.getElementById("appNotice");
   notice.textContent = `Searching "${query}"…`;
-  try {
-    const res  = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`,
-      { headers: { "Accept-Language": "en", "User-Agent": "SETL-EFB/1.0" } }
-    );
-    const data = await res.json();
-    if (!data.length) { notice.textContent = `Location not found: ${query}`; return; }
 
-    const lat = parseFloat(data[0].lat);
-    const lon = parseFloat(data[0].lon);
-    map.flyTo([lat, lon], 10, { animate: true, duration: 0.8 });
+  const NOM = "https://nominatim.openstreetmap.org/search";
+  const hdr = { headers: { "Accept-Language": "en", "User-Agent": "SETL-EFB/1.0" } };
+
+  try {
+    // Fire airport-specific and plain-city queries in parallel
+    const [aptData, cityData] = await Promise.all([
+      fetch(`${NOM}?q=${encodeURIComponent(query + " airport")}&format=json&limit=5`, hdr).then((r) => r.json()),
+      fetch(`${NOM}?q=${encodeURIComponent(query)}&format=json&limit=1`, hdr).then((r) => r.json()),
+    ]);
+
+    // Prefer a result that Nominatim classifies as an aeroway/aerodrome
+    const aptResult = aptData.find((r) =>
+      r.class === "aeroway" ||
+      r.type  === "aerodrome" ||
+      (r.display_name || "").toLowerCase().includes("airport") ||
+      (r.display_name || "").toLowerCase().includes("aerodrome") ||
+      (r.display_name || "").toLowerCase().includes("airfield")
+    );
+
+    // Use airport coordinates when found; fall back to city centre
+    const pick    = aptResult || cityData[0];
+    if (!pick) { notice.textContent = `Location not found: ${query}`; return; }
+
+    const lat     = parseFloat(pick.lat);
+    const lon     = parseFloat(pick.lon);
+    // Build a clean label; add "(Airport)" only if the name doesn't already say so
+    const firstName = pick.display_name.split(",")[0];
+    const label = aptResult && !firstName.toLowerCase().includes("airport")
+                    && !firstName.toLowerCase().includes("aerodrome")
+                    && !firstName.toLowerCase().includes("airfield")
+                  ? firstName + " Airport"
+                  : firstName;
+
+    map.flyTo([lat, lon], 11, { animate: true, duration: 0.8 });
     currentLat = lat;
     currentLon = lon;
 
-    // Clear stale aircraft cache from previous location; force immediate OpenSky refresh
+    // Clear stale cache; force immediate OpenSky refresh for new location
     _cachedOskyLocal = [];
     _oskyLastCall    = 0;
-    selectedAcId     = null;   // deselect any previously selected aircraft
-    _selPrevLat      = null;   // reset drift tracking
+    selectedAcId     = null;
+    _selPrevLat      = null;
     _selPrevLon      = null;
-    _riskLat         = lat;    // risk grid follows home until aircraft selected
+    _riskLat         = lat;
     _riskLon         = lon;
 
     await fetch(`/api/live-state/${sessionId}`, {
@@ -588,7 +615,7 @@ async function searchLocation(query) {
     });
 
     fetchAircraft();
-    notice.textContent = `Moved to: ${data[0].display_name.split(",")[0]}`;
+    notice.textContent = `Moved to: ${label}`;
   } catch (_) {
     document.getElementById("appNotice").textContent = "Search failed — check connection.";
   }
