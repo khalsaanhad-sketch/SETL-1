@@ -1,111 +1,448 @@
-const map = L.map("map").setView([23.25, 77.41], 13);
+// ── Map setup: Esri World Imagery satellite basemap ──────────────────────────
+const map = L.map("map").setView([23.25, 77.41], 10);
 
-// 🔥 REAL SATELLITE
 L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-  { maxZoom: 19 }
+  {
+    attribution: "&copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    maxZoom: 19,
+  }
 ).addTo(map);
 
 const terrainLayer = L.layerGroup().addTo(map);
-const gridLayer = L.layerGroup().addTo(map);
+const lzLayer      = L.layerGroup().addTo(map);
+const trafficLayer = L.layerGroup().addTo(map);
 
-let ws = null;
+// ── State ─────────────────────────────────────────────────────────────────────
+let sessionId        = null;
+let ws               = null;
+let currentLat       = 23.25;
+let currentLon       = 77.41;
+let currentAlt       = 5000;
+let currentSpd       = 100;
+let currentHdg       = 90;
+let selectedAcId     = null;
+let selectedAcMarker = null;
+let aircraftFeed     = [];
+let latestData       = null;
 
-// ---------------- INIT ----------------
-async function init() {
-  const res = await fetch("/api/session");
-  const data = await res.json();
-  connect(data.session_id);
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(v) {
+  return String(v ?? "").replace(
+    /[&<>"']/g,
+    (s) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[s]
+  );
 }
 
-// ---------------- WS (FIXED FOR REPLIT) ----------------
-function connect(sessionId) {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-    return;
+function riskToColor(r) {
+  if (r < 0.25) return "#2cb64f";
+  if (r < 0.45) return "#7dc840";
+  if (r < 0.60) return "#d8d62b";
+  if (r < 0.75) return "#ff9c00";
+  return "#ba2627";
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R    = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a    =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return Math.round(6371 * 2 * Math.asin(Math.sqrt(a)) * 10) / 10;
+}
+
+// ── Risk grid (computed client-side from backend risk score) ─────────────────
+function computeGrid(lat, lon, baseRisk, gridSize = 8, cellDeg = 0.004) {
+  const cells = [];
+  const half  = gridSize / 2;
+  const seed  = (Math.abs(lat * 100) % 997) + (Math.abs(lon * 100) % 997);
+
+  for (let row = -half; row < half; row++) {
+    for (let col = -half; col < half; col++) {
+      const clat = lat + row * cellDeg;
+      const clon = lon + col * cellDeg;
+
+      const variation =
+        Math.sin(row * 0.9 + seed * 0.01) * 0.15 +
+        Math.cos(col * 0.7 + seed * 0.01) * 0.15;
+      const risk = Math.min(1, Math.max(0, baseRisk + variation));
+      const r    = Math.round(risk * 100) / 100;
+
+      cells.push({
+        corners: [
+          [clat, clon],
+          [clat + cellDeg, clon],
+          [clat + cellDeg, clon + cellDeg],
+          [clat, clon + cellDeg],
+        ],
+        risk:          r,
+        ground_safety: Math.round((1 - r) * 100) / 100,
+        slope_deg:     Math.round(r * 18 * 10) / 10,
+        obstacle:      r > 0.6 ? "Possible" : "None",
+        color:         riskToColor(risk),
+      });
+    }
   }
-
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws/${sessionId}`);
-
-  ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    drawTerrain(data);
-    drawGrid(data);
-    drawDecision(data);
-  };
-
-  ws.onclose = () => setTimeout(() => connect(sessionId), 2000);
+  return cells;
 }
 
-// ---------------- TERRAIN ----------------
-function drawTerrain(data) {
-  terrainLayer.clearLayers();
-
-  const terrain = data.terrain || {};
-  const slope = terrain.slope || 0;
-  const elev = terrain.elevation || 0;
-
-  const center = map.getCenter();
-
-  let color = "#2cb64f";
-  if (slope > 1.2) color = "#ba2627";
-  else if (slope > 0.6) color = "#ff9c00";
-
-  L.circle(center, {
-    radius: 2000,
-    color,
-    fillColor: color,
-    fillOpacity: 0.15,
-  }).addTo(terrainLayer);
-
-  L.marker(center, {
-    icon: L.divIcon({
-      html: `<div style="
-        color:white;
-        background:rgba(0,0,0,0.7);
-        padding:6px;
-        border-radius:6px;
-      ">
-        Elev: ${Math.round(elev)} m<br>
-        Slope: ${slope.toFixed(2)}
-      </div>`
-    })
-  }).addTo(terrainLayer);
-}
-
-// ---------------- GRID ----------------
-function drawGrid(data) {
-  gridLayer.clearLayers();
-
-  const cells = data.cells || [];
-
-  cells.forEach(cell => {
-    L.polygon(cell.corners, {
-      color: cell.color,
-      fillColor: cell.color,
-      fillOpacity: 0.35,
-      weight: 1.2
-    })
-    .addTo(gridLayer)
-    .bindTooltip(
-      `Risk: ${cell.risk}<br>Slope: ${cell.slope}`
-    );
+// ── Aircraft markers ──────────────────────────────────────────────────────────
+function trafficIcon(selected = false) {
+  const color  = selected ? "#80ffdb" : "#60a5fa";
+  const size   = selected ? 18 : 12;
+  const border = selected ? "2px solid #062b2e" : "1px solid #0f172a";
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:${size}px;height:${size}px;border-radius:999px;
+      background:${color};border:${border};
+      box-shadow:0 0 0 3px rgba(255,255,255,0.18);"></div>`,
+    iconSize:   [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
 }
 
-// ---------------- DECISION ----------------
-function drawDecision(data) {
-  const box = document.getElementById("decisionBox");
-  if (!box) return;
+function drawTraffic() {
+  trafficLayer.clearLayers();
+  if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
 
-  const prob = data?.probabilistic?.success_probability || 0;
-  const guidance = data.guidance || {};
+  aircraftFeed.forEach((ac) => {
+    const isSel = ac.id === selectedAcId;
+    const m = L.marker([ac.latitude, ac.longitude], {
+      icon: trafficIcon(isSel),
+      zIndexOffset: isSel ? 1000 : 0,
+    }).addTo(trafficLayer);
 
-  box.innerHTML = `
-    <strong>${(prob * 100).toFixed(0)}% SAFE</strong><br>
-    Glide Range: ${guidance.glide_range_km || "--"} km<br>
-    Heading: ${guidance.heading || "--"}°
-  `;
+    m.bindTooltip(
+      `<strong>${esc(ac.callsign)}</strong><br>` +
+      `Alt ${Math.round(ac.altitude_ft)} ft<br>` +
+      `Spd ${Math.round(ac.speed_kts)} kt<br>` +
+      `Hdg ${Math.round(ac.heading_deg)}°<br>` +
+      `Dist ${ac.distance_km} km`
+    );
+    m.on("click", () => selectAircraft(ac));
+  });
+
+  const sel = aircraftFeed.find((a) => a.id === selectedAcId);
+  if (sel) {
+    selectedAcMarker = L.marker([sel.latitude, sel.longitude], {
+      icon: L.divIcon({
+        className: "",
+        html: `<div style="width:24px;height:24px;border-radius:999px;
+          background:#80ffdb;border:3px solid #083344;
+          box-shadow:0 0 0 4px rgba(128,255,219,0.18);"></div>`,
+        iconSize:   [24, 24],
+        iconAnchor: [12, 12],
+      }),
+      zIndexOffset: 2000,
+    }).addTo(map);
+  }
 }
+
+function drawTrafficList() {
+  const q = (document.getElementById("trafficSearch")?.value || "").trim().toLowerCase();
+  const filtered = aircraftFeed.filter((ac) => {
+    const txt = `${ac.callsign} ${ac.id}`.toLowerCase();
+    return !q || txt.includes(q);
+  });
+
+  const within20 = aircraftFeed.filter((a) => a.distance_km <= 20).length;
+  const nearest  = aircraftFeed.length ? aircraftFeed[0].distance_km : null;
+
+  document.getElementById("trafficSummary").innerHTML =
+    `Feed aircraft: ${aircraftFeed.length}<br>` +
+    `Within 20 km: ${within20}<br>` +
+    `Nearest: ${nearest != null ? nearest + " km" : "--"}`;
+
+  const list = document.getElementById("trafficList");
+  list.innerHTML = "";
+
+  if (!filtered.length) {
+    list.innerHTML = `<div class="lz-item"><strong>No aircraft</strong><span>Try a different search or wait for feed update</span></div>`;
+    return;
+  }
+
+  filtered.slice(0, 40).forEach((ac) => {
+    const row = document.createElement("div");
+    row.className = "lz-item" + (ac.id === selectedAcId ? " selected" : "");
+    row.style.cursor = "pointer";
+    row.innerHTML =
+      `<strong>${esc(ac.callsign)}</strong>` +
+      `<span>${Math.round(ac.altitude_ft)} ft • ${Math.round(ac.speed_kts)} kt • ${ac.distance_km} km</span>`;
+    row.addEventListener("click", () => selectAircraft(ac));
+    list.appendChild(row);
+  });
+}
+
+// ── Select aircraft → update backend state ────────────────────────────────────
+async function selectAircraft(ac) {
+  selectedAcId = ac.id;
+  currentLat   = ac.latitude;
+  currentLon   = ac.longitude;
+  currentAlt   = ac.altitude_ft;
+  currentSpd   = ac.speed_kts;
+  currentHdg   = ac.heading_deg;
+
+  await fetch(`/api/live-state/${sessionId}`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({
+      latitude:    ac.latitude,
+      longitude:   ac.longitude,
+      altitude_ft: ac.altitude_ft,
+      speed_kts:   ac.speed_kts,
+      heading_deg: ac.heading_deg,
+    }),
+  });
+
+  map.panTo([ac.latitude, ac.longitude], { animate: true, duration: 0.7 });
+  drawTraffic();
+  drawTrafficList();
+  if (latestData) draw(latestData);
+}
+
+// ── Fetch aircraft via backend proxy ──────────────────────────────────────────
+async function fetchAircraft() {
+  try {
+    const res  = await fetch(`/api/aircraft?lat=${currentLat}&lon=${currentLon}&radius=200`);
+    const data = await res.json();
+    if (!data.ac) return;
+
+    aircraftFeed = data.ac
+      .filter((ac) => ac.lat && ac.lon)
+      .map((ac) => ({
+        id:          ac.hex || "",
+        callsign:    (ac.flight || "").trim() || ac.hex || "",
+        icao24:      ac.hex || "",
+        latitude:    ac.lat,
+        longitude:   ac.lon,
+        altitude_ft: ac.alt_baro || 0,
+        speed_kts:   ac.gs || 0,
+        heading_deg: ac.track || 0,
+        distance_km: haversine(currentLat, currentLon, ac.lat, ac.lon),
+      }))
+      .sort((a, b) => a.distance_km - b.distance_km);
+
+    drawTraffic();
+    drawTrafficList();
+  } catch (_) {}
+}
+
+// ── Main draw — called on every WebSocket message ─────────────────────────────
+function draw(data) {
+  latestData = data;
+
+  // Derive overall failure risk from probabilistic engine
+  const failRisk = data.probabilistic ? data.probabilistic.failure : 0.3;
+
+  // ── Risk grid: use backend cells if present, else compute client-side ──────
+  terrainLayer.clearLayers();
+  lzLayer.clearLayers();
+
+  const cells = (data.cells && data.cells.length)
+    ? data.cells
+    : computeGrid(currentLat, currentLon, failRisk);
+
+  cells.forEach((cell) => {
+    const groundSafety = cell.ground_safety != null ? cell.ground_safety : Math.round((1 - cell.risk) * 100) / 100;
+    const slope        = cell.slope_deg    != null ? cell.slope_deg    : (cell.slope != null ? cell.slope : "--");
+    const obstacle     = cell.obstacle     != null ? cell.obstacle     : (cell.risk > 0.6 ? "Possible" : "None");
+
+    L.polygon(cell.corners, {
+      color:       cell.color,
+      fillColor:   cell.color,
+      fillOpacity: 0.28,
+      opacity:     0.85,
+      weight:      1,
+    })
+      .addTo(terrainLayer)
+      .bindTooltip(
+        `Risk ${cell.risk}<br>Ground ${groundSafety}<br>Slope ${slope}°<br>Obstacle ${obstacle}`,
+        { className: "terrain-tip" }
+      );
+  });
+
+  // ── Landing zones (3 safest cells) ────────────────────────────────────────
+  const sorted = [...cells].sort((a, b) => a.risk - b.risk);
+  const lzLabels = ["Primary LZ", "Secondary LZ", "Emergency LZ"];
+
+  sorted.slice(0, 3).forEach((cell) => {
+    L.polygon(cell.corners, {
+      color:       "#80ffdb",
+      weight:      2,
+      fillOpacity: 0.08,
+      dashArray:   "6,5",
+    }).addTo(lzLayer);
+  });
+
+  // ── Zones panel ────────────────────────────────────────────────────────────
+  const zonesEl = document.getElementById("zones");
+  zonesEl.innerHTML = "";
+  sorted.slice(0, 3).forEach((cell, i) => {
+    const div = document.createElement("div");
+    div.className = "lz-item";
+    div.innerHTML = `<strong>${lzLabels[i]}</strong><span>Risk ${cell.risk}</span>`;
+    zonesEl.appendChild(div);
+  });
+
+  // ── Decision panel ─────────────────────────────────────────────────────────
+  const recommended  = (data.options || []).find((o) => o.recommended);
+  const decisionTitle =
+    recommended
+      ? recommended.description
+      : data.alerts?.[0]?.message || "Monitoring situation...";
+  const decisionReason = recommended
+    ? `Success probability: ${Math.round((recommended.success_probability || 0) * 100)}%`
+    : `Risk level: ${Math.round(failRisk * 100)}%`;
+
+  document.getElementById("decisionBox").innerHTML =
+    `<strong>${esc(decisionTitle)}</strong><br>${esc(decisionReason)}`;
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
+  document.getElementById("source").textContent   = selAc ? "live traffic" : "manual";
+  document.getElementById("status").textContent   = selAc ? "live traffic selected" : "area mode";
+  document.getElementById("altitude").textContent = `${Math.round(currentAlt)} ft`;
+  document.getElementById("speed").textContent    = `${Math.round(currentSpd)} kt`;
+  document.getElementById("heading").textContent  = `${Math.round(currentHdg)}°`;
+  document.getElementById("riskLevel").textContent =
+    data.alerts?.[0]?.severity || "--";
+
+  // ── Layers panel ───────────────────────────────────────────────────────────
+  const terrain   = data.terrain || {};
+  const weather   = data.weather || {};
+  const layersEl  = document.getElementById("layers");
+  layersEl.innerHTML = "";
+
+  const layerRows = [
+    ["Surface Type",   terrain.surface_type ?? "--"],
+    ["Elevation",      terrain.elevation_m != null ? `${Math.round(terrain.elevation_m)} m` : "--"],
+    ["Slope",          terrain.slope_deg != null ? `${terrain.slope_deg}°` : "--"],
+    ["Wind",           weather.wind_speed_kts != null ? `${weather.wind_speed_kts} kt / ${weather.wind_direction_deg}°` : "--"],
+    ["Visibility",     weather.visibility_m  != null ? `${(weather.visibility_m / 1000).toFixed(1)} km` : "--"],
+    ["Precipitation",  weather.precipitation_mm != null ? `${weather.precipitation_mm} mm` : "--"],
+  ];
+
+  layerRows.forEach(([k, v]) => {
+    const div = document.createElement("div");
+    div.className = "lz-item";
+    div.innerHTML = `<strong>${esc(k)}</strong><span>${esc(v)}</span>`;
+    layersEl.appendChild(div);
+  });
+
+  // ── Ops view ───────────────────────────────────────────────────────────────
+  const g = data.guidance || {};
+  const p = data.probabilistic || {};
+  document.getElementById("opsInfo").innerHTML =
+    `${esc(g.action || "--")}<br>` +
+    `AGL: ${Math.round(g.agl_ft || 0)} ft &nbsp;|&nbsp; Time to ground: ${g.time_to_ground_min ?? "--"} min<br>` +
+    `Safe heading: ${g.safe_heading_deg ?? "--"}° &nbsp;|&nbsp; Rec. speed: ${g.recommended_speed_kts ?? "--"} kt<br>` +
+    `Success: ${Math.round((p.success || 0) * 100)}% &nbsp;|&nbsp; Confidence: ${Math.round((p.confidence || 0) * 100)}%`;
+}
+
+// ── WebSocket connection ───────────────────────────────────────────────────────
+function connectWS() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
+  ws.onmessage = (e) => draw(JSON.parse(e.data));
+  ws.onclose   = () => setTimeout(connectWS, 2000);
+}
+
+// ── Location search via Nominatim ─────────────────────────────────────────────
+async function searchLocation(query) {
+  query = (query || "").trim();
+  if (!query) return;
+  const notice = document.getElementById("appNotice");
+  notice.textContent = `Searching "${query}"…`;
+  try {
+    const res  = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`,
+      { headers: { "Accept-Language": "en", "User-Agent": "SETL-EFB/1.0" } }
+    );
+    const data = await res.json();
+    if (!data.length) { notice.textContent = `Location not found: ${query}`; return; }
+
+    const lat = parseFloat(data[0].lat);
+    const lon = parseFloat(data[0].lon);
+    map.setView([lat, lon], 12);
+    currentLat = lat;
+    currentLon = lon;
+
+    await fetch(`/api/live-state/${sessionId}`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ latitude: lat, longitude: lon }),
+    });
+
+    fetchAircraft();
+    notice.textContent = `Moved to: ${data[0].display_name.split(",")[0]}`;
+  } catch (_) {
+    document.getElementById("appNotice").textContent = "Search failed — check connection.";
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  const res  = await fetch("/api/session");
+  const data = await res.json();
+  sessionId  = data.session_id;
+
+  const field = document.getElementById("sessionId");
+  field.value    = sessionId.slice(0, 8) + "…";
+  field.readOnly = true;
+  field.style.color  = "#99a8c6";
+  field.style.cursor = "default";
+
+  connectWS();
+  fetchAircraft();
+  setInterval(fetchAircraft, 6000);
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+document.getElementById("connectBtn").addEventListener("click", async () => {
+  if (ws) { ws.close(); ws = null; }
+  const res  = await fetch("/api/session");
+  const data = await res.json();
+  sessionId  = data.session_id;
+  document.getElementById("sessionId").value = sessionId.slice(0, 8) + "…";
+  connectWS();
+  fetchAircraft();
+  document.getElementById("appNotice").textContent = "Reconnected.";
+});
+
+document.getElementById("demoBtn").addEventListener("click", async () => {
+  // Demo: Delhi area, busy traffic zone
+  const lat = 28.5562, lon = 77.1000;
+  currentLat = lat; currentLon = lon;
+  currentAlt = 2725; currentSpd = 177; currentHdg = 272;
+  await fetch(`/api/live-state/${sessionId}`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ latitude: lat, longitude: lon, altitude_ft: 2725, speed_kts: 177, heading_deg: 272 }),
+  });
+  map.setView([lat, lon], 12);
+  fetchAircraft();
+  document.getElementById("appNotice").textContent = "Demo mode active — Delhi approach area.";
+});
+
+document.getElementById("locationBtn").addEventListener("click", () => {
+  searchLocation(document.getElementById("locationSearch").value);
+});
+document.getElementById("locationSearch").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") searchLocation(document.getElementById("locationSearch").value);
+});
+
+document.getElementById("trafficSearch").addEventListener("input", () => drawTrafficList());
+document.getElementById("trafficSearchBtn").addEventListener("click", () => drawTrafficList());
+
+document.getElementById("clearTrackBtn").addEventListener("click", () => {
+  selectedAcId = null;
+  if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
+  drawTraffic();
+  drawTrafficList();
+  document.getElementById("appNotice").textContent = "Returned to area mode.";
+});
 
 init();

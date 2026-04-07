@@ -1,7 +1,9 @@
 from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
+import httpx
 import uuid
 import random
 
@@ -79,7 +81,23 @@ def generate_cells(state, terrain, prob):
 
 @app.get("/")
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse("cloud_app/static/favicon.ico")
+
+
+@app.get("/api/aircraft")
+async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
+    url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
+            return resp.json()
+    except Exception:
+        return {"ac": []}
 
 
 @app.get("/api/session")
@@ -114,7 +132,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 alerts = compute_alerts(risk, prob)
                 guidance = compute_guidance(state, terrain)
 
-                cells = generate_cells(state, terrain, prob["success_probability"])
+                cells = generate_cells(state, terrain, prob["success"])
 
                 result = {
                     "alerts": alerts,
