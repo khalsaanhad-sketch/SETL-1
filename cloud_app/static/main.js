@@ -213,8 +213,8 @@ async function selectAircraft(ac) {
     }),
   });
 
-  // Zoom to level 12 — shows the full ~10 km risk grid with orientation context
-  map.flyTo([ac.latitude, ac.longitude], 12, { animate: true, duration: 0.8 });
+  // Zoom 10: shows ~80 km radius — risk grid readable + city/terrain context
+  map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
   if (latestData) draw(latestData);
