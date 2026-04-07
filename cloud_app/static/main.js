@@ -1,5 +1,5 @@
 // ── Map setup: Esri satellite basemap + labels overlay ───────────────────────
-const map = L.map("map", { maxZoom: 19 }).setView([23.25, 77.41], 10);
+const map = L.map("map", { maxZoom: 19 }).setView([28.6139, 77.2090], 10);
 
 // Custom pane for labels so they sit above terrain polygons (overlayPane z=400)
 // but below aircraft markers (markerPane z=600)
@@ -37,8 +37,8 @@ const trafficLayer = L.layerGroup().addTo(map);
 // ── State ─────────────────────────────────────────────────────────────────────
 let sessionId        = null;
 let ws               = null;
-let currentLat       = 23.25;
-let currentLon       = 77.41;
+let currentLat       = 28.6139;
+let currentLon       = 77.2090;
 let currentAlt       = 5000;
 let currentSpd       = 100;
 let currentHdg       = 90;
@@ -515,7 +515,7 @@ async function searchLocation(query) {
 
     const lat = parseFloat(data[0].lat);
     const lon = parseFloat(data[0].lon);
-    map.setView([lat, lon], 12);
+    map.flyTo([lat, lon], 10, { animate: true, duration: 0.8 });
     currentLat = lat;
     currentLon = lon;
 

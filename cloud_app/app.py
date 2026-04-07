@@ -29,8 +29,8 @@ sessions = {}
 def ensure_session(sid):
     if sid not in sessions:
         sessions[sid] = {
-            "latitude": 23.25,
-            "longitude": 77.41,
+            "latitude": 28.6139,
+            "longitude": 77.2090,
             "altitude_ft": 5000,
             "speed_kts": 100,
             "heading_deg": 90,
