@@ -220,14 +220,61 @@ async function selectAircraft(ac) {
   if (latestData) draw(latestData);
 }
 
-// ── Fetch aircraft via backend proxy ──────────────────────────────────────────
+// ── OpenSky client-side fallback ─────────────────────────────────────────────
+// OpenSky blocks Replit's datacenter IPs, but the *browser* has a residential/
+// mobile IP that is not blocked. We fetch directly from here and normalise
+// the state-vector array into the same shape as our ADS-B feed.
+let _oskyLastCall = 0;
+
+async function fetchOpenSkyDirect() {
+  const now = Date.now();
+  // Anonymous rate limit: 1 req / 10 s.  We use 15 s for safety.
+  if (now - _oskyLastCall < 15_000) return [];
+  _oskyLastCall = now;
+
+  // ±2° bounding box ≈ 200 km radius at mid-latitudes
+  const d   = 2.0;
+  const url = "https://opensky-network.org/api/states/all" +
+    `?lamin=${(currentLat - d).toFixed(4)}&lomin=${(currentLon - d).toFixed(4)}` +
+    `&lamax=${(currentLat + d).toFixed(4)}&lomax=${(currentLon + d).toFixed(4)}`;
+
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.states) return [];
+
+    // OpenSky state vector:
+    // [0] icao24  [1] callsign  [5] lon  [6] lat
+    // [7] baro_alt_m  [8] on_ground  [9] velocity_m_s  [10] true_track_deg
+    return data.states
+      .filter((s) => s[6] != null && s[5] != null && s[8] === false)
+      .map((s) => ({
+        id:          s[0],
+        callsign:    (s[1] || "").trim() || s[0],
+        icao24:      s[0],
+        latitude:    s[6],
+        longitude:   s[5],
+        altitude_ft: s[7] != null ? Math.round(s[7] * 3.28084) : 0,
+        speed_kts:   s[9] != null ? Math.round(s[9] * 1.944)   : 0,
+        heading_deg: s[10] || 0,
+        distance_km: haversine(currentLat, currentLon, s[6], s[5]),
+        source:      "opensky",
+      }))
+      .filter((ac) => ac.distance_km <= 250)
+      .sort((a, b) => a.distance_km - b.distance_km);
+  } catch (_) {
+    return [];
+  }
+}
+
+// ── Fetch aircraft via backend proxy (+ OpenSky client-side fallback) ─────────
 async function fetchAircraft() {
   try {
     const res  = await fetch(`/api/aircraft?lat=${currentLat}&lon=${currentLon}&radius=200`);
     const data = await res.json();
-    if (!data.ac) return;
 
-    aircraftFeed = data.ac
+    let feed = (data.ac || [])
       .filter((ac) => ac.lat && ac.lon)
       .map((ac) => ({
         id:          ac.hex || "",
@@ -239,9 +286,22 @@ async function fetchAircraft() {
         speed_kts:   ac.gs || 0,
         heading_deg: ac.track || 0,
         distance_km: haversine(currentLat, currentLon, ac.lat, ac.lon),
+        source:      "adsb",
       }))
       .sort((a, b) => a.distance_km - b.distance_km);
 
+    // When primary/secondary ADS-B sources are sparse, try OpenSky from browser.
+    // Deduplicate: prefer ADS-B data for any aircraft already in the feed.
+    if (feed.length < 5) {
+      const osky = await fetchOpenSkyDirect();
+      if (osky.length) {
+        const seen = new Set(feed.map((a) => a.id));
+        const extra = osky.filter((a) => !seen.has(a.id));
+        feed = [...feed, ...extra].sort((a, b) => a.distance_km - b.distance_km);
+      }
+    }
+
+    aircraftFeed = feed;
     drawTraffic();
     drawTrafficList();
   } catch (_) {}
