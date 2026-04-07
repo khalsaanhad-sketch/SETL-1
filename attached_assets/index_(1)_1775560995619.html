@@ -2,22 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="theme-color" content="#0b1220" />
-    <title>SETL Live EFB</title>
-    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>SETL Complete Road Layer EFB</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="layout">
       <aside class="panel">
-        <h1>SETL</h1>
-        <p class="sub">Smart Emergency Terrain Landing — real-time EFB with live fusion and terrain risk grid.</p>
+        <h1>SETL Complete</h1>
+        <p class="sub">
+          Hybrid Replit + GitHub-ready EFB with live fusion, airport logic, and
+          road decision layer.
+        </p>
 
         <div class="card">
           <label>Session ID</label>
-          <input id="sessionId" value="setl-live-1" />
+          <input id="sessionId" value="demo-classroom-1" />
           <div class="buttons">
             <button id="connectBtn">Connect</button>
             <button id="demoBtn">Start Demo</button>
@@ -26,23 +37,33 @@
 
         <div class="card">
           <h2>Controls</h2>
+
           <div class="field">
             <label for="locationSearch">Location search</label>
             <div class="buttons stretch">
-              <input id="locationSearch" placeholder="Delhi, Jaipur Airport, Mumbai..." />
+              <input
+                id="locationSearch"
+                placeholder="Delhi, Jaipur Airport, Mumbai..."
+              />
               <button id="locationBtn">Search</button>
             </div>
           </div>
+
           <div class="field">
             <label for="trafficSearch">Aircraft search</label>
             <div class="buttons stretch">
-              <input id="trafficSearch" placeholder="Search callsign or ICAO24" />
+              <input
+                id="trafficSearch"
+                placeholder="Search callsign or ICAO24"
+              />
               <button id="trafficSearchBtn">Find</button>
             </div>
           </div>
+
           <div class="buttons">
             <button id="clearTrackBtn" class="ghost">Area Mode</button>
           </div>
+
           <div id="appNotice" class="mini">Ready.</div>
         </div>
 
@@ -57,7 +78,6 @@
           <div><span>Altitude</span><strong id="altitude">--</strong></div>
           <div><span>Speed</span><strong id="speed">--</strong></div>
           <div><span>Heading</span><strong id="heading">--</strong></div>
-          <div><span>Risk</span><strong id="riskLevel">--</strong></div>
         </div>
 
         <div class="card">
@@ -96,7 +116,10 @@
       </main>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      crossorigin=""
+    ></script>
     <script src="/static/main.js"></script>
   </body>
 </html>

@@ -1,10 +1,9 @@
 from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
-import httpx
 import uuid
+import random
 
 from cloud_app.services.risk_engine import compute_risk
 from cloud_app.services.guidance_engine import compute_guidance
@@ -34,25 +33,53 @@ def ensure_session(sid):
     return sessions[sid]
 
 
+# 🔥 Backend-driven grid (safe version)
+def generate_cells(state, terrain, prob):
+    lat = state["latitude"]
+    lon = state["longitude"]
+
+    cells = []
+    size = 0.01
+
+    base_slope = terrain.get("slope", 0)
+
+    for i in range(-4, 5):
+        for j in range(-4, 5):
+            cell_lat = lat + i * size
+            cell_lon = lon + j * size
+
+            slope = base_slope + random.uniform(-0.2, 0.2)
+            slope = max(0, slope)
+
+            risk = min(1.0, slope + (1 - prob))
+
+            if risk > 0.6:
+                color = "#ba2627"
+            elif risk > 0.3:
+                color = "#ff9c00"
+            else:
+                color = "#2cb64f"
+
+            cells.append(
+                {
+                    "corners": [
+                        [cell_lat, cell_lon],
+                        [cell_lat + size, cell_lon],
+                        [cell_lat + size, cell_lon + size],
+                        [cell_lat, cell_lon + size],
+                    ],
+                    "risk": round(risk, 2),
+                    "color": color,
+                    "slope": round(slope, 2),
+                }
+            )
+
+    return cells
+
+
 @app.get("/")
 def home(request: Request):
-    return templates.TemplateResponse(request, "index.html")
-
-
-@app.get("/favicon.ico", include_in_schema=False)
-def favicon():
-    return FileResponse("cloud_app/static/favicon.ico")
-
-
-@app.get("/api/aircraft")
-async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
-    url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}"
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
-            return resp.json()
-    except Exception:
-        return {"ac": []}
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/api/session")
@@ -77,30 +104,42 @@ async def ws_endpoint(ws: WebSocket, sid: str):
 
     try:
         while True:
-            terrain = await get_terrain(state["latitude"], state["longitude"])
-            weather = await get_weather(state["latitude"], state["longitude"])
+            try:
+                terrain = await get_terrain(state["latitude"], state["longitude"])
+                weather = await get_weather(state["latitude"], state["longitude"])
 
-            risk = compute_risk(state)
-            prob = compute_probability(risk)
-            options = compute_options(prob)
-            alerts = compute_alerts(risk, prob)
-            guidance = compute_guidance(state, terrain)
+                risk = compute_risk(state)
+                prob = compute_probability(risk)
+                options = compute_options(prob)
+                alerts = compute_alerts(risk, prob)
+                guidance = compute_guidance(state, terrain)
 
-            result = {
-                "alerts": alerts,
-                "guidance": guidance,
-                "probabilistic": prob,
-                "options": options,
-                "terrain": terrain,
-                "weather": weather,
-            }
+                cells = generate_cells(state, terrain, prob["success_probability"])
 
-            await ws.send_json(result)
-            await asyncio.sleep(1.5)
+                result = {
+                    "alerts": alerts,
+                    "guidance": guidance,
+                    "probabilistic": prob,
+                    "options": options,
+                    "terrain": terrain,
+                    "weather": weather,
+                    "cells": cells,
+                }
+
+                await ws.send_json(result)
+                await asyncio.sleep(1.5)
+
+            except RuntimeError:
+                break
 
     except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
+        print("Client disconnected")
+
+    except Exception as e:
+        print("WebSocket error:", e)
+
     finally:
-        sessions.pop(sid, None)
+        try:
+            await ws.close()
+        except:
+            pass

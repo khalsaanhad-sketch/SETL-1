@@ -1,90 +1,111 @@
-let map = L.map('map').setView([23.25, 77.41], 6);
+const map = L.map("map").setView([23.25, 77.41], 13);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+// 🔥 REAL SATELLITE
+L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19 }
+).addTo(map);
 
-let sessionId = null;
+const terrainLayer = L.layerGroup().addTo(map);
+const gridLayer = L.layerGroup().addTo(map);
+
 let ws = null;
-let aircraftMarkers = {};
 
+// ---------------- INIT ----------------
 async function init() {
   const res = await fetch("/api/session");
   const data = await res.json();
-  sessionId = data.session_id;
-
-  connectWS();
-  setInterval(fetchAircraft, 3000);
+  connect(data.session_id);
 }
 
-function connectWS() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-
-  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sessionId}`);
-
-  ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-
-    renderAlerts(data.alerts);
-  };
-
-  ws.onclose = () => {
-    setTimeout(connectWS, 2000);
-  };
-}
-
-function renderAlerts(alerts) {
-  const box = document.getElementById("alerts");
-  box.innerHTML = alerts.map(a => `<div>${a.message}</div>`).join("");
-}
-
-async function fetchAircraft() {
-  try {
-    const center = map.getCenter();
-
-    const res = await fetch(
-      `/api/aircraft?lat=${center.lat}&lon=${center.lng}&radius=200`
-    );
-
-    const data = await res.json();
-
-    if (!data.ac) return;
-
-    // Clear old markers
-    Object.values(aircraftMarkers).forEach(m => map.removeLayer(m));
-    aircraftMarkers = {};
-
-    data.ac.forEach(ac => {
-      if (!ac.lat || !ac.lon) return;
-
-      const id = ac.hex || Math.random();
-
-      const marker = L.circleMarker([ac.lat, ac.lon], {
-        radius: 4,
-        color: "#00d4ff"
-      }).addTo(map);
-
-      marker.on("click", () => selectAircraft(ac));
-
-      aircraftMarkers[id] = marker;
-    });
-
-  } catch (e) {
-    console.log("Aircraft fetch error");
+// ---------------- WS (FIXED FOR REPLIT) ----------------
+function connect(sessionId) {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
   }
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/${sessionId}`);
+
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    drawTerrain(data);
+    drawGrid(data);
+    drawDecision(data);
+  };
+
+  ws.onclose = () => setTimeout(() => connect(sessionId), 2000);
 }
 
-async function selectAircraft(ac) {
-  await fetch(`/api/live-state/${sessionId}`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      latitude: ac.lat,
-      longitude: ac.lon,
-      altitude_ft: ac.alt_baro || 0,
-      speed_kts: ac.gs || 0,
-      heading_deg: ac.track || 0
+// ---------------- TERRAIN ----------------
+function drawTerrain(data) {
+  terrainLayer.clearLayers();
+
+  const terrain = data.terrain || {};
+  const slope = terrain.slope || 0;
+  const elev = terrain.elevation || 0;
+
+  const center = map.getCenter();
+
+  let color = "#2cb64f";
+  if (slope > 1.2) color = "#ba2627";
+  else if (slope > 0.6) color = "#ff9c00";
+
+  L.circle(center, {
+    radius: 2000,
+    color,
+    fillColor: color,
+    fillOpacity: 0.15,
+  }).addTo(terrainLayer);
+
+  L.marker(center, {
+    icon: L.divIcon({
+      html: `<div style="
+        color:white;
+        background:rgba(0,0,0,0.7);
+        padding:6px;
+        border-radius:6px;
+      ">
+        Elev: ${Math.round(elev)} m<br>
+        Slope: ${slope.toFixed(2)}
+      </div>`
     })
+  }).addTo(terrainLayer);
+}
+
+// ---------------- GRID ----------------
+function drawGrid(data) {
+  gridLayer.clearLayers();
+
+  const cells = data.cells || [];
+
+  cells.forEach(cell => {
+    L.polygon(cell.corners, {
+      color: cell.color,
+      fillColor: cell.color,
+      fillOpacity: 0.35,
+      weight: 1.2
+    })
+    .addTo(gridLayer)
+    .bindTooltip(
+      `Risk: ${cell.risk}<br>Slope: ${cell.slope}`
+    );
   });
+}
+
+// ---------------- DECISION ----------------
+function drawDecision(data) {
+  const box = document.getElementById("decisionBox");
+  if (!box) return;
+
+  const prob = data?.probabilistic?.success_probability || 0;
+  const guidance = data.guidance || {};
+
+  box.innerHTML = `
+    <strong>${(prob * 100).toFixed(0)}% SAFE</strong><br>
+    Glide Range: ${guidance.glide_range_km || "--"} km<br>
+    Heading: ${guidance.heading || "--"}°
+  `;
 }
 
 init();

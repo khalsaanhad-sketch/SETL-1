@@ -15,7 +15,8 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-html, body {
+html,
+body {
   margin: 0;
   height: 100%;
   background: var(--bg);
@@ -45,14 +46,6 @@ body {
   scrollbar-gutter: stable;
 }
 
-.panel h1 {
-  margin: 0 0 4px;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: #e8eefb;
-}
-
 .mapShell {
   position: relative;
   min-width: 0;
@@ -74,11 +67,10 @@ body {
   margin-top: 14px;
 }
 
-.sub, .mini {
+.sub,
+.mini {
   color: var(--muted);
-  font-size: 13px;
   line-height: 1.45;
-  margin: 0;
 }
 
 .stats {
@@ -100,24 +92,16 @@ body {
   margin-bottom: 4px;
 }
 
-.stats strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-label, h2 {
+label,
+h2 {
   display: block;
   font-size: 13px;
   color: #cbd6ec;
   margin: 10px 0 6px;
 }
 
-h2 {
-  font-weight: 600;
-  margin-top: 0;
-}
-
-input, button {
+input,
+button {
   width: 100%;
   min-height: 42px;
   border-radius: 10px;
@@ -126,22 +110,21 @@ input, button {
   color: var(--text);
   padding: 10px 12px;
   font: inherit;
-  font-size: 14px;
 }
 
 input {
   outline: none;
 }
 
-input::placeholder {
-  color: #93a3b8;
-}
-
 button {
   cursor: pointer;
   touch-action: manipulation;
   user-select: none;
-  transition: transform 0.05s ease, background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  transition:
+    transform 0.05s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.15s ease;
 }
 
 button:hover {
@@ -170,12 +153,12 @@ button:disabled {
   margin-bottom: 10px;
 }
 
-.field label, .card > label {
+.field label,
+.card>label {
   display: block;
   font-size: 0.82rem;
   color: rgba(226, 232, 240, 0.8);
   margin-bottom: 6px;
-  margin-top: 0;
 }
 
 .card input {
@@ -186,6 +169,10 @@ button:disabled {
   background: var(--input-bg-2);
   color: #e5e7eb;
   outline: none;
+}
+
+.card input::placeholder {
+  color: #93a3b8;
 }
 
 .buttons.stretch {
@@ -203,7 +190,7 @@ button:disabled {
 .buttons.stretch button {
   flex: 0 0 auto;
   width: auto;
-  min-width: 76px;
+  min-width: 96px;
 }
 
 .ghost {
@@ -227,7 +214,11 @@ button:disabled {
 .legendBar {
   height: 14px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #2cb64f 0%, #d8d62b 35%, #ff9c00 65%, #ba2627 100%);
+  background: linear-gradient(90deg,
+      #2cb64f 0%,
+      #d8d62b 35%,
+      #ff9c00 65%,
+      #ba2627 100%);
 }
 
 .legendLabels {
@@ -240,8 +231,7 @@ button:disabled {
 
 .lz-list {
   display: grid;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
 }
 
 .lz-item {
@@ -249,24 +239,15 @@ button:disabled {
   background: rgba(255, 255, 255, 0.04);
   border-radius: 10px;
   border-left: 4px solid #46d36f;
-  font-size: 13px;
-  line-height: 1.4;
 }
 
-.lz-item strong {
-  display: block;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-
-.lz-item span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.lz-item.selected {
-  outline: 1px solid rgba(128, 255, 219, 0.45);
-  background: rgba(128, 255, 219, 0.08);
+.aircraft-icon {
+  width: 16px;
+  height: 16px;
+  background: #59d8ff;
+  border: 2px solid white;
+  border-radius: 50%;
+  box-shadow: 0 0 0 8px rgba(89, 216, 255, 0.18);
 }
 
 .leaflet-tooltip.terrain-tip {
@@ -274,7 +255,6 @@ button:disabled {
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: none;
-  font-size: 12px;
 }
 
 .trafficHead {
@@ -290,7 +270,8 @@ button:disabled {
 
 #trafficList {
   max-height: 240px;
-  overflow-y: auto;
+  overflow: auto;
+  margin-top: 8px;
 }
 
 #appNotice {
@@ -299,7 +280,9 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
-  body { overflow: auto; }
+  body {
+    overflow: auto;
+  }
 
   .layout {
     grid-template-columns: 1fr;
@@ -320,14 +303,29 @@ button:disabled {
     min-height: 420px;
   }
 
-  #map { height: 100%; }
+  #map {
+    height: 100%;
+  }
 
-  .trafficHead { flex-direction: column; }
-  #trafficSummary { text-align: left; }
+  .trafficHead {
+    flex-direction: column;
+  }
 
-  .buttons { grid-template-columns: 1fr; }
-  .buttons.stretch { flex-wrap: wrap; }
-  .buttons.stretch button { width: 100%; }
+  #trafficSummary {
+    text-align: left;
+  }
+
+  .buttons {
+    grid-template-columns: 1fr;
+  }
+
+  .buttons.stretch {
+    flex-wrap: wrap;
+  }
+
+  .buttons.stretch button {
+    width: 100%;
+  }
 
   .legendWrap {
     width: min(220px, calc(100vw - 24px));
