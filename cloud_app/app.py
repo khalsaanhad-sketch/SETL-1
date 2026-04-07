@@ -276,7 +276,7 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
         f"https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{radius}",
     ]
 
-    async with httpx.AsyncClient(timeout=9.0) as client:
+    async with httpx.AsyncClient(timeout=8.0) as client:
         auth = await _opensky_auth_header(client)
 
         async def fetch_adsb() -> list:
@@ -297,6 +297,7 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
                 r = await client.get(
                     osky_url,
                     headers={"Authorization": auth, "User-Agent": "SETL-EFB/1.0"},
+                    timeout=3.0,   # fast fail — Replit IPs often IP-blocked by OpenSky
                 )
                 return _parse_opensky_states(r.json().get("states") or [])
             except Exception:
