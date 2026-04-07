@@ -1,11 +1,32 @@
-// ── Map setup: Esri World Imagery satellite basemap ──────────────────────────
-const map = L.map("map").setView([23.25, 77.41], 10);
+// ── Map setup: Esri satellite basemap + labels overlay ───────────────────────
+const map = L.map("map", { maxZoom: 19 }).setView([23.25, 77.41], 10);
 
+// Custom pane for labels so they sit above terrain polygons (overlayPane z=400)
+// but below aircraft markers (markerPane z=600)
+map.createPane("labelsPane");
+map.getPane("labelsPane").style.zIndex = 450;
+map.getPane("labelsPane").style.pointerEvents = "none";
+
+// Layer 1: high-res satellite imagery (land + ocean real-world appearance)
 L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   {
-    attribution: "&copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
-    maxZoom: 19,
+    attribution:   "&copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    maxZoom:       19,
+    maxNativeZoom: 19,
+  }
+).addTo(map);
+
+// Layer 2: transparent place-name labels — cities, countries, water body names
+// (Arabian Sea, Bay of Bengal…), roads, admin borders at every zoom level.
+// Rendered above terrain polygons but below aircraft markers.
+L.tileLayer(
+  "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+  {
+    attribution:   "",
+    maxZoom:       19,
+    maxNativeZoom: 19,
+    pane:          "labelsPane",
   }
 ).addTo(map);
 
