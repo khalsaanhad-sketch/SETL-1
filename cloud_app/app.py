@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
@@ -35,6 +36,11 @@ def ensure_session(sid):
 @app.get("/")
 def home(request: Request):
     return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse("cloud_app/static/favicon.ico")
 
 
 @app.get("/api/session")
