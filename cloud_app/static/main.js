@@ -91,15 +91,24 @@ function computeGrid(lat, lon, baseRisk, gridSize = 8, cellDeg = 0.004) {
 // ── Aircraft markers ──────────────────────────────────────────────────────────
 function trafficIcon(selected = false) {
   const color  = selected ? "#80ffdb" : "#60a5fa";
-  const size   = selected ? 18 : 12;
-  const border = selected ? "2px solid #062b2e" : "1px solid #0f172a";
+  const dot    = selected ? 18 : 14;
+  const pad    = 8;                        // invisible padding for easier clicking
+  const total  = dot + pad * 2;
+  const border = selected ? "2.5px solid #062b2e" : "1.5px solid #0f172a";
+  const glow   = selected
+    ? "0 0 0 4px rgba(128,255,219,0.30), 0 2px 8px rgba(0,0,0,0.5)"
+    : "0 0 0 3px rgba(255,255,255,0.15), 0 1px 4px rgba(0,0,0,0.4)";
   return L.divIcon({
     className: "",
-    html: `<div style="width:${size}px;height:${size}px;border-radius:999px;
-      background:${color};border:${border};
-      box-shadow:0 0 0 3px rgba(255,255,255,0.18);"></div>`,
-    iconSize:   [size, size],
-    iconAnchor: [size / 2, size / 2],
+    // Outer div = transparent hit-area; inner div = visible dot
+    html: `<div style="width:${total}px;height:${total}px;display:flex;
+      align-items:center;justify-content:center;cursor:pointer;">
+      <div style="width:${dot}px;height:${dot}px;border-radius:999px;
+        background:${color};border:${border};box-shadow:${glow};
+        transition:transform 0.15s;"></div>
+    </div>`,
+    iconSize:   [total, total],
+    iconAnchor: [total / 2, total / 2],
   });
 }
 
@@ -110,8 +119,9 @@ function drawTraffic() {
   aircraftFeed.forEach((ac) => {
     const isSel = ac.id === selectedAcId;
     const m = L.marker([ac.latitude, ac.longitude], {
-      icon: trafficIcon(isSel),
-      zIndexOffset: isSel ? 1000 : 0,
+      icon:            trafficIcon(isSel),
+      zIndexOffset:    isSel ? 2000 : 0,
+      bubblingMouseEvents: false,
     }).addTo(trafficLayer);
 
     m.bindTooltip(
@@ -119,25 +129,11 @@ function drawTraffic() {
       `Alt ${Math.round(ac.altitude_ft)} ft<br>` +
       `Spd ${Math.round(ac.speed_kts)} kt<br>` +
       `Hdg ${Math.round(ac.heading_deg)}°<br>` +
-      `Dist ${ac.distance_km} km`
+      `Dist ${ac.distance_km} km`,
+      { direction: "top", offset: [0, -4] }
     );
-    m.on("click", () => selectAircraft(ac));
+    m.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
   });
-
-  const sel = aircraftFeed.find((a) => a.id === selectedAcId);
-  if (sel) {
-    selectedAcMarker = L.marker([sel.latitude, sel.longitude], {
-      icon: L.divIcon({
-        className: "",
-        html: `<div style="width:24px;height:24px;border-radius:999px;
-          background:#80ffdb;border:3px solid #083344;
-          box-shadow:0 0 0 4px rgba(128,255,219,0.18);"></div>`,
-        iconSize:   [24, 24],
-        iconAnchor: [12, 12],
-      }),
-      zIndexOffset: 2000,
-    }).addTo(map);
-  }
 }
 
 function drawTrafficList() {
@@ -196,7 +192,8 @@ async function selectAircraft(ac) {
     }),
   });
 
-  map.panTo([ac.latitude, ac.longitude], { animate: true, duration: 0.7 });
+  // Zoom to level 12 — shows the full ~10 km risk grid with orientation context
+  map.flyTo([ac.latitude, ac.longitude], 12, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
   if (latestData) draw(latestData);
