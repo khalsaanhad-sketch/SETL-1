@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+jinja2
+python-multipart
+httpx
+numpy
+pillow
+fastapi
+httpx
+jinja2
+numpy
+pillow
+python-multipart
+uvicorn
+websockets
