@@ -42,7 +42,7 @@ async function fetchAircraft() {
     const center = map.getCenter();
 
     const res = await fetch(
-      `https://api.airplanes.live/v2/point/${center.lat}/${center.lng}/200`
+      `/api/aircraft?lat=${center.lat}&lon=${center.lng}&radius=200`
     );
 
     const data = await res.json();
