@@ -294,15 +294,14 @@ async function fetchAircraft() {
       }))
       .sort((a, b) => a.distance_km - b.distance_km);
 
-    // When primary/secondary ADS-B sources are sparse, try OpenSky from browser.
-    // Deduplicate: prefer ADS-B data for any aircraft already in the feed.
-    if (feed.length < 5) {
-      const osky = await fetchOpenSkyDirect();
-      if (osky.length) {
-        const seen = new Set(feed.map((a) => a.id));
-        const extra = osky.filter((a) => !seen.has(a.id));
-        feed = [...feed, ...extra].sort((a, b) => a.distance_km - b.distance_km);
-      }
+    // Always supplement with browser-direct OpenSky fetch (throttled to 15 s).
+    // This uses the user's own IP, bypassing any server-side IP block, and
+    // ensures domestic flights are always included regardless of ADS-B coverage.
+    const osky = await fetchOpenSkyDirect();
+    if (osky.length) {
+      const seen = new Set(feed.map((a) => a.id));
+      const extra = osky.filter((a) => !seen.has(a.id));
+      feed = [...feed, ...extra].sort((a, b) => a.distance_km - b.distance_km);
     }
 
     aircraftFeed = feed;

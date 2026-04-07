@@ -6,6 +6,7 @@ import asyncio
 import base64
 import httpx
 import os
+import time
 import uuid
 import random
 
@@ -129,75 +130,135 @@ def favicon():
     return FileResponse("cloud_app/static/favicon.ico")
 
 
+# ── OpenSky auth helpers ───────────────────────────────────────────────────────
+_osky_token_cache: dict = {"token": None, "expires_at": 0.0}
+
+
 def _opensky_basic_auth() -> str | None:
-    """Return a Basic-Auth header value if credentials are configured."""
     user = os.environ.get("OPENSKY_USER", "").strip()
     pw   = os.environ.get("OPENSKY_PASS", "").strip()
     if user and pw:
-        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
-        return f"Basic {token}"
+        return "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
     return None
+
+
+async def _opensky_bearer_token(client: httpx.AsyncClient) -> str | None:
+    """Fetch (or return cached) an OAuth2 Bearer token from OpenSky."""
+    client_id  = os.environ.get("OPENSKY_CLIENT_ID",     "").strip()
+    client_sec = os.environ.get("OPENSKY_CLIENT_SECRET", "").strip()
+    if not client_id or not client_sec:
+        return None
+    now = time.time()
+    if _osky_token_cache["token"] and now < _osky_token_cache["expires_at"] - 60:
+        return _osky_token_cache["token"]
+    try:
+        resp = await client.post(
+            "https://auth.opensky-network.org/auth/realms/opensky-network"
+            "/protocol/openid-connect/token",
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     client_id,
+                "client_secret": client_sec,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=6.0,
+        )
+        data  = resp.json()
+        token = data.get("access_token")
+        if token:
+            _osky_token_cache["token"]      = token
+            _osky_token_cache["expires_at"] = now + data.get("expires_in", 3600)
+            return token
+    except Exception:
+        pass
+    return None
+
+
+async def _opensky_auth_header(client: httpx.AsyncClient) -> str | None:
+    """Best available auth: OAuth2 Bearer > Basic Auth > None."""
+    token = await _opensky_bearer_token(client)
+    if token:
+        return f"Bearer {token}"
+    return _opensky_basic_auth()
+
+
+def _parse_opensky_states(states: list) -> list:
+    """Convert OpenSky state vectors → our aircraft dict format."""
+    ac = []
+    for s in states:
+        # [0]=icao24 [1]=callsign [5]=lon [6]=lat [7]=baro_alt_m
+        # [8]=on_ground [9]=vel_m_s [10]=true_track_deg
+        if s[6] is None or s[5] is None or s[8]:
+            continue
+        ac.append({
+            "hex":      s[0],
+            "flight":   (s[1] or "").strip(),
+            "lat":      s[6],
+            "lon":      s[5],
+            "alt_baro": round(s[7] * 3.28084) if s[7] else 0,
+            "gs":       round(s[9] * 1.944)   if s[9] else 0,
+            "track":    s[10] or 0,
+        })
+    return ac
 
 
 @app.get("/api/aircraft")
 async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
-    adsb_sources = [
+    d        = 1.8   # ±1.8° ≈ 200 km bounding box for OpenSky
+    osky_url = (
+        "https://opensky-network.org/api/states/all"
+        f"?lamin={lat - d:.4f}&lomin={lon - d:.4f}"
+        f"&lamax={lat + d:.4f}&lomax={lon + d:.4f}"
+    )
+    adsb_urls = [
         f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}",
         f"https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{radius}",
     ]
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        # ── Primary / secondary: ADS-B aggregators ───────────────────────────
-        for url in adsb_sources:
-            try:
-                resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
-                data = resp.json()
-                if data.get("ac"):
-                    return data
-            except Exception:
-                continue
 
-        # ── Tertiary: OpenSky authenticated (may bypass datacenter IP block) ─
-        auth = _opensky_basic_auth()
-        if auth:
+    async with httpx.AsyncClient(timeout=9.0) as client:
+        auth = await _opensky_auth_header(client)
+
+        async def fetch_adsb() -> list:
+            for url in adsb_urls:
+                try:
+                    r = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
+                    d = r.json()
+                    if d.get("ac"):
+                        return d["ac"]
+                except Exception:
+                    continue
+            return []
+
+        async def fetch_opensky() -> list:
+            if not auth:
+                return []
             try:
-                d   = 1.8   # ~200 km bounding box
-                url = (
-                    "https://opensky-network.org/api/states/all"
-                    f"?lamin={lat - d:.4f}&lomin={lon - d:.4f}"
-                    f"&lamax={lat + d:.4f}&lomax={lon + d:.4f}"
+                r = await client.get(
+                    osky_url,
+                    headers={"Authorization": auth, "User-Agent": "SETL-EFB/1.0"},
                 )
-                resp = await client.get(url, headers={"Authorization": auth,
-                                                       "User-Agent": "SETL-EFB/1.0"})
-                data = resp.json()
-                states = data.get("states") or []
-                ac = []
-                for s in states:
-                    # state vector: [icao24, callsign, …, lon(5), lat(6),
-                    #                baro_alt_m(7), on_ground(8), vel_m_s(9), track(10)]
-                    if s[6] is None or s[5] is None or s[8]:
-                        continue
-                    ac.append({
-                        "hex":      s[0],
-                        "flight":   (s[1] or "").strip(),
-                        "lat":      s[6],
-                        "lon":      s[5],
-                        "alt_baro": round(s[7] * 3.28084) if s[7] else 0,
-                        "gs":       round(s[9] * 1.944)   if s[9] else 0,
-                        "track":    s[10] or 0,
-                    })
-                if ac:
-                    return {"ac": ac, "source": "opensky"}
+                return _parse_opensky_states(r.json().get("states") or [])
             except Exception:
-                pass
+                return []
 
-    return {"ac": []}
+        # Run ADS-B and OpenSky in parallel — always, not as a fallback
+        adsb_ac, osky_ac = await asyncio.gather(fetch_adsb(), fetch_opensky())
+
+        # Merge: OpenSky first, then ADS-B overwrites duplicates (richer data)
+        merged: dict[str, dict] = {ac["hex"]: ac for ac in osky_ac}
+        for ac in adsb_ac:
+            merged[ac["hex"]] = ac
+
+        return {"ac": list(merged.values())}
 
 
 @app.get("/api/opensky-creds")
 async def opensky_creds():
-    """Return a pre-built Basic-Auth header for browser-side OpenSky fetches.
-    The actual credentials never appear in the JS bundle."""
-    auth = _opensky_basic_auth()
+    """Return auth header for browser-side OpenSky fetches.
+    Prefers OAuth2 Bearer; falls back to Basic Auth.
+    Credentials never appear in the JS bundle."""
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        auth = await _opensky_auth_header(client)
     return {"auth": auth}
 
 
