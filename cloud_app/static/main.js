@@ -286,7 +286,12 @@ async function fetchOpenSkyDirect() {
 }
 
 // ── Fetch aircraft: backend proxy + browser-direct OpenSky ────────────────────
+let _fetchAcInProgress = false;
+
 async function fetchAircraft() {
+  // Skip if a previous call is still in-flight to prevent overlapping requests
+  if (_fetchAcInProgress) return;
+  _fetchAcInProgress = true;
   try {
     // Run ADS-B backend call and browser-direct OpenSky in parallel
     const [backendRes, oskyFresh] = await Promise.all([
@@ -360,7 +365,11 @@ async function fetchAircraft() {
 
     drawTraffic();
     drawTrafficList();
-  } catch (_) {}
+  } catch (_) {
+    // silent — keep previous aircraft state on transient errors
+  } finally {
+    _fetchAcInProgress = false;
+  }
 }
 
 // ── Main draw — called on every WebSocket message ─────────────────────────────
@@ -544,11 +553,13 @@ function connectWS() {
 
   ws.onclose = () => {
     setWsStatus("reconnecting");
-    wsReconnectTimer = setTimeout(connectWS, 2000);
+    // 3 s backoff before reconnecting — avoids fast reconnect storms on transient drops
+    wsReconnectTimer = setTimeout(connectWS, 3000);
   };
 
   ws.onerror = () => {
     setWsStatus("reconnecting");
+    // onerror is always followed by onclose, so reconnect is handled there
   };
 }
 

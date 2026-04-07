@@ -378,19 +378,23 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 }
 
                 await ws.send_json(result)
-                await asyncio.sleep(1.5)
 
-            except RuntimeError:
-                break
+            except (WebSocketDisconnect, RuntimeError):
+                # Client closed the connection — exit cleanly
+                return
 
-    except WebSocketDisconnect:
-        print("Client disconnected")
+            except Exception as e:
+                # Recoverable computation/fetch error — log and continue
+                print(f"WS frame error (recoverable): {e}")
+
+            # Always pause between ticks, even after an error
+            await asyncio.sleep(1.5)
 
     except Exception as e:
-        print("WebSocket error:", e)
+        print("WebSocket fatal error:", e)
 
     finally:
         try:
             await ws.close()
-        except:
+        except Exception:
             pass
