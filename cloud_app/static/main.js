@@ -47,7 +47,7 @@ let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData            = null;
 let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
-let _cachedOskyDomestic   = [];     // persists between fetchAircraft() calls
+let _cachedOskyLocal      = [];     // local OpenSky results, persist between fetchAircraft() calls
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(v) {
@@ -222,57 +222,37 @@ async function selectAircraft(ac) {
   if (latestData) draw(latestData);
 }
 
-// ── Indian domestic detection (mirrors backend logic) ─────────────────────────
-// India's ICAO 24-bit address block: 0x800000 – 0x87FFFF
-const _INDIA_ICAO_LO = 0x800000;
-const _INDIA_ICAO_HI = 0x87FFFF;
-const _INDIAN_PREFIXES = new Set([
-  "IGO","AIC","SEJ","VTI","AXB","GOW","IAD","LLR","BDA","SDK","TRJ","FLB","SHL","DDG","CIL",
-]);
-
-function _isIndianDomestic(s) {
-  // Signal 1: ICAO24 hex block
-  const addr = parseInt(s[0], 16);
-  if (!isNaN(addr) && addr >= _INDIA_ICAO_LO && addr <= _INDIA_ICAO_HI) return true;
-  // Signal 2: origin_country
-  if ((s[2] || "").trim() === "India") return true;
-  // Signal 3: callsign prefix
-  const cs = (s[1] || "").trim().toUpperCase();
-  if (cs.length >= 3 && _INDIAN_PREFIXES.has(cs.slice(0, 3))) return true;
-  return false;
-}
-
 // ── OpenSky client-side fetch ─────────────────────────────────────────────────
-// Browser IP bypasses any server-side IP block on OpenSky.
-// We always use the INDIA-WIDE bounding box so all domestic flights are visible
-// everywhere — even when the user searches outside India.
-// India bounding box: J&K (37.5°N) → Kanyakumari (6.5°N), Gujarat (68°E) → Arunachal (97.5°E)
-const _INDIA_BBOX = { lamin: 6.5, lomin: 68.0, lamax: 37.5, lomax: 97.5 };
+// Fetches all aircraft within ±3° of the current location from the user's
+// browser (bypasses any datacenter IP block on OpenSky).
+// Shows whatever is flying near the searched location — India, USA, Europe, etc.
 let _oskyLastCall = 0;
 
 async function fetchOpenSkyDirect() {
   const now = Date.now();
-  // Registered users: 1 req / 10 s. We use 15 s for safety.
-  if (now - _oskyLastCall < 15_000) return { domestic: [], international: [] };
+  // Registered users: 1 req / 10 s.  We use 15 s for safety.
+  if (now - _oskyLastCall < 15_000) return [];
   _oskyLastCall = now;
 
+  const d   = 3.0;   // ±3° ≈ 330 km for solid regional coverage
   const url = "https://opensky-network.org/api/states/all" +
-    `?lamin=${_INDIA_BBOX.lamin}&lomin=${_INDIA_BBOX.lomin}` +
-    `&lamax=${_INDIA_BBOX.lamax}&lomax=${_INDIA_BBOX.lomax}`;
+    `?lamin=${(currentLat - d).toFixed(4)}&lomin=${(currentLon - d).toFixed(4)}` +
+    `&lamax=${(currentLat + d).toFixed(4)}&lomax=${(currentLon + d).toFixed(4)}`;
 
   const headers = {};
   if (_oskyAuthHeader) headers["Authorization"] = _oskyAuthHeader;
 
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(12_000) });
-    if (!res.ok) return { domestic: [], international: [] };
+    if (!res.ok) return [];
     const data = await res.json();
-    if (!data.states) return { domestic: [], international: [] };
+    if (!data.states) return [];
 
-    const domestic = [], international = [];
+    const results = [];
     for (const s of data.states) {
+      // skip: no position or on ground
       if (s[6] == null || s[5] == null || s[8] !== false) continue;
-      const entry = {
+      results.push({
         id:          s[0],
         callsign:    (s[1] || "").trim() || s[0],
         icao24:      s[0],
@@ -281,23 +261,21 @@ async function fetchOpenSkyDirect() {
         altitude_ft: s[7] != null ? Math.round(s[7] * 3.28084) : 0,
         speed_kts:   s[9] != null ? Math.round(s[9] * 1.944)   : 0,
         heading_deg: s[10] || 0,
-        distance_km: 0,   // recomputed per-location in fetchAircraft()
+        distance_km: 0,   // recomputed from current location in fetchAircraft()
         source:      "opensky",
-      };
-      if (_isIndianDomestic(s)) domestic.push(entry);
-      else                       international.push(entry);
+      });
     }
-    return { domestic, international };
+    return results;
   } catch (_) {
-    return { domestic: [], international: [] };
+    return [];
   }
 }
 
 // ── Fetch aircraft: backend proxy + browser-direct OpenSky ────────────────────
 async function fetchAircraft() {
   try {
-    // Run backend ADS-B fetch and browser-direct OpenSky in parallel
-    const [backendRes, oskyResult] = await Promise.all([
+    // Run ADS-B backend call and browser-direct OpenSky in parallel
+    const [backendRes, oskyFresh] = await Promise.all([
       fetch(`/api/aircraft?lat=${currentLat}&lon=${currentLon}&radius=200`).then((r) => r.json()),
       fetchOpenSkyDirect(),
     ]);
@@ -318,34 +296,48 @@ async function fetchAircraft() {
         source:      "adsb",
       }));
 
-    // ── Update domestic cache when OpenSky returned fresh data ──
-    if (oskyResult.domestic.length > 0) {
-      _cachedOskyDomestic = oskyResult.domestic;
-    }
+    // ── Update local OpenSky cache when fresh data arrived ──
+    if (oskyFresh.length > 0) _cachedOskyLocal = oskyFresh;
 
-    // ── Merge with priority: ADS-B wins, domestic always present ──
-    // Start from the cached domestic so they survive throttle windows
-    const merged = new Map(
-      _cachedOskyDomestic.map((a) => [a.id, a])
-    );
-    // ADS-B overwrites duplicates (higher fidelity)
+    // ── Merge: cached OpenSky base, ADS-B overwrites duplicates (higher fidelity) ──
+    const merged = new Map(_cachedOskyLocal.map((a) => [a.id, a]));
     for (const ac of adsbFeed) merged.set(ac.id, ac);
 
-    // International OpenSky only when ADS-B returned nothing at all
-    if (adsbFeed.length === 0) {
-      for (const ac of oskyResult.international) {
-        if (!merged.has(ac.id)) merged.set(ac.id, ac);
-      }
-    }
-
-    // Recompute distance from CURRENT location for every aircraft in the feed
-    // (important for cached entries whose distance_km was 0 or stale)
+    // ── Recompute distance from current location (handles stale cache + location change) ──
     aircraftFeed = [...merged.values()]
       .map((ac) => ({
         ...ac,
         distance_km: haversine(currentLat, currentLon, ac.latitude, ac.longitude),
       }))
       .sort((a, b) => a.distance_km - b.distance_km);
+
+    // ── Track selected aircraft position → keep risk grid live as it moves ──
+    if (selectedAcId) {
+      const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
+      if (selAc) {
+        // Only re-post if the aircraft has meaningfully moved (>0.1 km)
+        const drift = haversine(currentLat, currentLon, selAc.latitude, selAc.longitude);
+        if (drift > 0.1) {
+          currentLat = selAc.latitude;
+          currentLon = selAc.longitude;
+          currentAlt = selAc.altitude_ft;
+          currentSpd = selAc.speed_kts;
+          currentHdg = selAc.heading_deg;
+          // Post new position — backend immediately recalculates terrain risk grid
+          fetch(`/api/live-state/${sessionId}`, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              latitude:    selAc.latitude,
+              longitude:   selAc.longitude,
+              altitude_ft: selAc.altitude_ft,
+              speed_kts:   selAc.speed_kts,
+              heading_deg: selAc.heading_deg,
+            }),
+          });
+        }
+      }
+    }
 
     drawTraffic();
     drawTrafficList();
@@ -560,6 +552,11 @@ async function searchLocation(query) {
     map.flyTo([lat, lon], 10, { animate: true, duration: 0.8 });
     currentLat = lat;
     currentLon = lon;
+
+    // Clear stale aircraft cache from previous location; force immediate OpenSky refresh
+    _cachedOskyLocal = [];
+    _oskyLastCall    = 0;
+    selectedAcId     = null;   // deselect any previously selected aircraft
 
     await fetch(`/api/live-state/${sessionId}`, {
       method:  "POST",
