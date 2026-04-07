@@ -48,6 +48,13 @@ let aircraftFeed     = [];
 let latestData            = null;
 let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
 let _cachedOskyLocal      = [];     // local OpenSky results, persist between fetchAircraft() calls
+// Risk state — position posted to /api/live-state for risk grid calculation.
+// Follows selected aircraft; falls back to home base when nothing is selected.
+let _riskLat    = 28.6139;
+let _riskLon    = 77.2090;
+// Previous position of the selected aircraft — used to detect movement for live-state re-POST.
+let _selPrevLat = null;
+let _selPrevLon = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(v) {
@@ -197,11 +204,18 @@ function drawTrafficList() {
 // ── Select aircraft → update backend state ────────────────────────────────────
 async function selectAircraft(ac) {
   selectedAcId = ac.id;
-  currentLat   = ac.latitude;
-  currentLon   = ac.longitude;
-  currentAlt   = ac.altitude_ft;
-  currentSpd   = ac.speed_kts;
-  currentHdg   = ac.heading_deg;
+  // NOTE: currentLat/currentLon (home base) are NOT touched here.
+  // They always stay at the searched/home location so the feed distances
+  // remain relative to the searched location (e.g. Indore), not the aircraft.
+  currentAlt  = ac.altitude_ft;
+  currentSpd  = ac.speed_kts;
+  currentHdg  = ac.heading_deg;
+
+  // Track risk position separately — follows the selected aircraft
+  _riskLat    = ac.latitude;
+  _riskLon    = ac.longitude;
+  _selPrevLat = ac.latitude;
+  _selPrevLon = ac.longitude;
 
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
@@ -303,26 +317,31 @@ async function fetchAircraft() {
     const merged = new Map(_cachedOskyLocal.map((a) => [a.id, a]));
     for (const ac of adsbFeed) merged.set(ac.id, ac);
 
-    // ── Recompute distance from current location (handles stale cache + location change) ──
+    // ── Recompute distance from HOME location (currentLat/currentLon is always home) ──
+    // Filter to ≤250 km so distant aircraft don't distort "nearest" / "within 20 km" stats.
     aircraftFeed = [...merged.values()]
       .map((ac) => ({
         ...ac,
         distance_km: haversine(currentLat, currentLon, ac.latitude, ac.longitude),
       }))
+      .filter((ac) => ac.distance_km <= 250)
       .sort((a, b) => a.distance_km - b.distance_km);
 
     // ── Track selected aircraft position → keep risk grid live as it moves ──
+    // Compare against PREVIOUS aircraft position (not home), so drift > 0 only
+    // when the aircraft itself has moved, not when the home base is far away.
     if (selectedAcId) {
       const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
-      if (selAc) {
-        // Only re-post if the aircraft has meaningfully moved (>0.1 km)
-        const drift = haversine(currentLat, currentLon, selAc.latitude, selAc.longitude);
+      if (selAc && _selPrevLat != null) {
+        const drift = haversine(_selPrevLat, _selPrevLon, selAc.latitude, selAc.longitude);
         if (drift > 0.1) {
-          currentLat = selAc.latitude;
-          currentLon = selAc.longitude;
-          currentAlt = selAc.altitude_ft;
-          currentSpd = selAc.speed_kts;
-          currentHdg = selAc.heading_deg;
+          _selPrevLat = selAc.latitude;
+          _selPrevLon = selAc.longitude;
+          _riskLat    = selAc.latitude;
+          _riskLon    = selAc.longitude;
+          currentAlt  = selAc.altitude_ft;
+          currentSpd  = selAc.speed_kts;
+          currentHdg  = selAc.heading_deg;
           // Post new position — backend immediately recalculates terrain risk grid
           fetch(`/api/live-state/${sessionId}`, {
             method:  "POST",
@@ -557,6 +576,10 @@ async function searchLocation(query) {
     _cachedOskyLocal = [];
     _oskyLastCall    = 0;
     selectedAcId     = null;   // deselect any previously selected aircraft
+    _selPrevLat      = null;   // reset drift tracking
+    _selPrevLon      = null;
+    _riskLat         = lat;    // risk grid follows home until aircraft selected
+    _riskLon         = lon;
 
     await fetch(`/api/live-state/${sessionId}`, {
       method:  "POST",
@@ -610,8 +633,13 @@ document.getElementById("connectBtn").addEventListener("click", async () => {
 document.getElementById("demoBtn").addEventListener("click", async () => {
   // Demo: Delhi area, busy traffic zone
   const lat = 28.5562, lon = 77.1000;
-  currentLat = lat; currentLon = lon;
-  currentAlt = 2725; currentSpd = 177; currentHdg = 272;
+  currentLat  = lat;  currentLon  = lon;
+  currentAlt  = 2725; currentSpd  = 177; currentHdg  = 272;
+  // Risk state aligns with home for demo (no aircraft pre-selected)
+  _riskLat    = lat;  _riskLon    = lon;
+  _selPrevLat = null; _selPrevLon = null;
+  selectedAcId = null;
+  _cachedOskyLocal = []; _oskyLastCall = 0;
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
@@ -632,9 +660,19 @@ document.getElementById("locationSearch").addEventListener("keydown", (e) => {
 document.getElementById("trafficSearch").addEventListener("input", () => drawTrafficList());
 document.getElementById("trafficSearchBtn").addEventListener("click", () => drawTrafficList());
 
-document.getElementById("clearTrackBtn").addEventListener("click", () => {
+document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   selectedAcId = null;
+  _selPrevLat  = null;
+  _selPrevLon  = null;
+  _riskLat     = currentLat;   // restore risk grid to home base
+  _riskLon     = currentLon;
   if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
+  // Re-centre the risk grid on home
+  await fetch(`/api/live-state/${sessionId}`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ latitude: currentLat, longitude: currentLon }),
+  });
   drawTraffic();
   drawTrafficList();
   document.getElementById("appNotice").textContent = "Returned to area mode.";
