@@ -221,19 +221,35 @@ async function selectAircraft(ac) {
   if (latestData) draw(latestData);
 }
 
-// ── OpenSky client-side fallback ─────────────────────────────────────────────
-// OpenSky blocks Replit's datacenter IPs, but the *browser* has a residential/
-// mobile IP that is not blocked. We fetch directly from here and normalise
-// the state-vector array into the same shape as our ADS-B feed.
+// ── Indian domestic detection (mirrors backend logic) ─────────────────────────
+// India's ICAO 24-bit address block: 0x800000 – 0x87FFFF
+const _INDIA_ICAO_LO = 0x800000;
+const _INDIA_ICAO_HI = 0x87FFFF;
+const _INDIAN_PREFIXES = new Set([
+  "IGO","AIC","SEJ","VTI","AXB","GOW","IAD","LLR","BDA","SDK","TRJ","FLB","SHL","DDG","CIL",
+]);
+
+function _isIndianDomestic(s) {
+  // Signal 1: ICAO24 hex block
+  const addr = parseInt(s[0], 16);
+  if (!isNaN(addr) && addr >= _INDIA_ICAO_LO && addr <= _INDIA_ICAO_HI) return true;
+  // Signal 2: origin_country
+  if ((s[2] || "").trim() === "India") return true;
+  // Signal 3: callsign prefix
+  const cs = (s[1] || "").trim().toUpperCase();
+  if (cs.length >= 3 && _INDIAN_PREFIXES.has(cs.slice(0, 3))) return true;
+  return false;
+}
+
+// ── OpenSky client-side fetch ─────────────────────────────────────────────────
+// Browser IP bypasses any server-side IP block on OpenSky.
 let _oskyLastCall = 0;
 
 async function fetchOpenSkyDirect() {
   const now = Date.now();
-  // Registered users: 1 req / 10 s.  We use 15 s for safety.
-  if (now - _oskyLastCall < 15_000) return [];
+  if (now - _oskyLastCall < 15_000) return { domestic: [], international: [] };
   _oskyLastCall = now;
 
-  // ±2° bounding box ≈ 200 km radius at mid-latitudes
   const d   = 2.0;
   const url = "https://opensky-network.org/api/states/all" +
     `?lamin=${(currentLat - d).toFixed(4)}&lomin=${(currentLon - d).toFixed(4)}` +
@@ -244,16 +260,14 @@ async function fetchOpenSkyDirect() {
 
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return [];
+    if (!res.ok) return { domestic: [], international: [] };
     const data = await res.json();
-    if (!data.states) return [];
+    if (!data.states) return { domestic: [], international: [] };
 
-    // OpenSky state vector:
-    // [0] icao24  [1] callsign  [5] lon  [6] lat
-    // [7] baro_alt_m  [8] on_ground  [9] velocity_m_s  [10] true_track_deg
-    return data.states
-      .filter((s) => s[6] != null && s[5] != null && s[8] === false)
-      .map((s) => ({
+    const domestic = [], international = [];
+    for (const s of data.states) {
+      if (s[6] == null || s[5] == null || s[8] !== false) continue;
+      const entry = {
         id:          s[0],
         callsign:    (s[1] || "").trim() || s[0],
         icao24:      s[0],
@@ -264,21 +278,25 @@ async function fetchOpenSkyDirect() {
         heading_deg: s[10] || 0,
         distance_km: haversine(currentLat, currentLon, s[6], s[5]),
         source:      "opensky",
-      }))
-      .filter((ac) => ac.distance_km <= 250)
-      .sort((a, b) => a.distance_km - b.distance_km);
+      };
+      if (entry.distance_km > 250) continue;
+      if (_isIndianDomestic(s)) domestic.push(entry);
+      else                       international.push(entry);
+    }
+    return { domestic, international };
   } catch (_) {
-    return [];
+    return { domestic: [], international: [] };
   }
 }
 
-// ── Fetch aircraft via backend proxy (+ OpenSky client-side fallback) ─────────
+// ── Fetch aircraft: backend proxy + browser-direct OpenSky ────────────────────
 async function fetchAircraft() {
   try {
     const res  = await fetch(`/api/aircraft?lat=${currentLat}&lon=${currentLon}&radius=200`);
     const data = await res.json();
 
-    let feed = (data.ac || [])
+    // Normalise ADS-B results from backend (already includes domestic OpenSky)
+    const adsbFeed = (data.ac || [])
       .filter((ac) => ac.lat && ac.lon)
       .map((ac) => ({
         id:          ac.hex || "",
@@ -291,20 +309,23 @@ async function fetchAircraft() {
         heading_deg: ac.track || 0,
         distance_km: haversine(currentLat, currentLon, ac.lat, ac.lon),
         source:      "adsb",
-      }))
-      .sort((a, b) => a.distance_km - b.distance_km);
+      }));
 
-    // Always supplement with browser-direct OpenSky fetch (throttled to 15 s).
-    // This uses the user's own IP, bypassing any server-side IP block, and
-    // ensures domestic flights are always included regardless of ADS-B coverage.
-    const osky = await fetchOpenSkyDirect();
-    if (osky.length) {
-      const seen = new Set(feed.map((a) => a.id));
-      const extra = osky.filter((a) => !seen.has(a.id));
-      feed = [...feed, ...extra].sort((a, b) => a.distance_km - b.distance_km);
+    // Browser-direct OpenSky (throttled to 15 s) — extra insurance for domestic
+    const { domestic: oskyDom, international: oskyIntl } = await fetchOpenSkyDirect();
+
+    // Merge: start with domestic OpenSky, then let ADS-B overwrite duplicates
+    const merged = new Map(oskyDom.map((a) => [a.id, a]));
+    for (const ac of adsbFeed) merged.set(ac.id, ac);     // ADS-B wins
+
+    // International OpenSky only when ADS-B returned nothing at all
+    if (adsbFeed.length === 0) {
+      for (const ac of oskyIntl) {
+        if (!merged.has(ac.id)) merged.set(ac.id, ac);
+      }
     }
 
-    aircraftFeed = feed;
+    aircraftFeed = [...merged.values()].sort((a, b) => a.distance_km - b.distance_km);
     drawTraffic();
     drawTrafficList();
   } catch (_) {}

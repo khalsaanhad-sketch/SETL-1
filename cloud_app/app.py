@@ -182,15 +182,72 @@ async def _opensky_auth_header(client: httpx.AsyncClient) -> str | None:
     return _opensky_basic_auth()
 
 
-def _parse_opensky_states(states: list) -> list:
-    """Convert OpenSky state vectors → our aircraft dict format."""
-    ac = []
+# ── Indian domestic flight detection ──────────────────────────────────────────
+# India's ICAO 24-bit address block: 0x800000 – 0x87FFFF
+_INDIA_ICAO_LO = 0x800000
+_INDIA_ICAO_HI = 0x87FFFF
+
+# ICAO airline designators for Indian carriers (domestic operators)
+_INDIAN_CALLSIGN_PREFIXES = {
+    "IGO",  # IndiGo
+    "AIC",  # Air India
+    "SEJ",  # SpiceJet
+    "VTI",  # Vistara (now merged into Air India)
+    "AXB",  # Akasa Air
+    "GOW",  # Go First
+    "IAD",  # Air Asia India
+    "LLR",  # Alliance Air
+    "BDA",  # Blue Dart Aviation
+    "SDK",  # Star Air
+    "TRJ",  # TruJet
+    "FLB",  # FlyBig
+    "SHL",  # Shree Airlines
+    "DDG",  # Deccan Charters
+    "CIL",  # Air Carnival
+}
+
+
+def _is_indian_domestic(s: list) -> bool:
+    """Return True if the OpenSky state vector is an Indian-registered aircraft.
+
+    Uses three independent signals — any one match is sufficient:
+      1. ICAO24 hex address in India's allocated block (0x800000–0x87FFFF)
+      2. origin_country field == "India"
+      3. Callsign starts with a known Indian carrier ICAO prefix
+    """
+    # Signal 1: ICAO24 address block
+    try:
+        addr = int((s[0] or "").strip(), 16)
+        if _INDIA_ICAO_LO <= addr <= _INDIA_ICAO_HI:
+            return True
+    except (ValueError, TypeError):
+        pass
+
+    # Signal 2: origin_country
+    if (s[2] or "").strip() == "India":
+        return True
+
+    # Signal 3: callsign prefix
+    callsign = (s[1] or "").strip().upper()
+    if len(callsign) >= 3 and callsign[:3] in _INDIAN_CALLSIGN_PREFIXES:
+        return True
+
+    return False
+
+
+def _parse_opensky_states(states: list) -> tuple[list, list]:
+    """Convert OpenSky state vectors → (domestic_ac, international_ac).
+
+    State vector layout:
+      [0]=icao24  [1]=callsign  [2]=origin_country
+      [5]=lon  [6]=lat  [7]=baro_alt_m
+      [8]=on_ground  [9]=vel_m_s  [10]=true_track_deg
+    """
+    domestic, international = [], []
     for s in states:
-        # [0]=icao24 [1]=callsign [5]=lon [6]=lat [7]=baro_alt_m
-        # [8]=on_ground [9]=vel_m_s [10]=true_track_deg
-        if s[6] is None or s[5] is None or s[8]:
+        if s[6] is None or s[5] is None or s[8]:   # no position or on ground
             continue
-        ac.append({
+        entry = {
             "hex":      s[0],
             "flight":   (s[1] or "").strip(),
             "lat":      s[6],
@@ -198,8 +255,12 @@ def _parse_opensky_states(states: list) -> list:
             "alt_baro": round(s[7] * 3.28084) if s[7] else 0,
             "gs":       round(s[9] * 1.944)   if s[9] else 0,
             "track":    s[10] or 0,
-        })
-    return ac
+        }
+        if _is_indian_domestic(s):
+            domestic.append(entry)
+        else:
+            international.append(entry)
+    return domestic, international
 
 
 @app.get("/api/aircraft")
@@ -222,16 +283,16 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
             for url in adsb_urls:
                 try:
                     r = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
-                    d = r.json()
-                    if d.get("ac"):
-                        return d["ac"]
+                    data = r.json()
+                    if data.get("ac"):
+                        return data["ac"]
                 except Exception:
                     continue
             return []
 
-        async def fetch_opensky() -> list:
+        async def fetch_opensky() -> tuple[list, list]:
             if not auth:
-                return []
+                return [], []
             try:
                 r = await client.get(
                     osky_url,
@@ -239,15 +300,24 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
                 )
                 return _parse_opensky_states(r.json().get("states") or [])
             except Exception:
-                return []
+                return [], []
 
-        # Run ADS-B and OpenSky in parallel — always, not as a fallback
-        adsb_ac, osky_ac = await asyncio.gather(fetch_adsb(), fetch_opensky())
+        # Run ADS-B and OpenSky in parallel
+        adsb_ac, (osky_domestic, osky_intl) = await asyncio.gather(
+            fetch_adsb(), fetch_opensky()
+        )
 
-        # Merge: OpenSky first, then ADS-B overwrites duplicates (richer data)
-        merged: dict[str, dict] = {ac["hex"]: ac for ac in osky_ac}
+        # ── Merge strategy ────────────────────────────────────────────────────
+        # Domestic OpenSky is PRIMARY: always included alongside ADS-B.
+        # International OpenSky is FALLBACK: only added when ADS-B returns nothing.
+        # ADS-B data overwrites OpenSky for any duplicate ICAO24 (richer fields).
+        merged: dict[str, dict] = {ac["hex"]: ac for ac in osky_domestic}
         for ac in adsb_ac:
-            merged[ac["hex"]] = ac
+            merged[ac["hex"]] = ac          # ADS-B wins on duplicate
+
+        if not adsb_ac:                     # fallback: no ADS-B at all
+            for ac in osky_intl:
+                merged.setdefault(ac["hex"], ac)
 
         return {"ac": list(merged.values())}
 
