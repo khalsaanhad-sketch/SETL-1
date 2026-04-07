@@ -91,13 +91,20 @@ def favicon():
 
 @app.get("/api/aircraft")
 async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
-    url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}"
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
-            return resp.json()
-    except Exception:
-        return {"ac": []}
+    sources = [
+        f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}",
+        f"https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{radius}",
+    ]
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        for url in sources:
+            try:
+                resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
+                data = resp.json()
+                if data.get("ac"):
+                    return data
+            except Exception:
+                continue
+    return {"ac": []}
 
 
 @app.get("/api/session")

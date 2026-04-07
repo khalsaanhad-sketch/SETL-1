@@ -342,12 +342,47 @@ function draw(data) {
 }
 
 // ── WebSocket connection ───────────────────────────────────────────────────────
+let wsReconnectTimer = null;
+
+function setWsStatus(state) {
+  const dot   = document.getElementById("wsDot");
+  const label = document.getElementById("wsLabel");
+  if (!dot || !label) return;
+  const cfg = {
+    connected:    { color: "#2cb64f", text: "Live" },
+    reconnecting: { color: "#ff9c00", text: "Reconnecting…" },
+    disconnected: { color: "#ba2627", text: "Offline" },
+  };
+  const c = cfg[state] || cfg.disconnected;
+  dot.style.background   = c.color;
+  dot.style.boxShadow    = `0 0 6px ${c.color}88`;
+  label.textContent      = c.text;
+}
+
 function connectWS() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  setWsStatus("reconnecting");
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
-  ws.onmessage = (e) => draw(JSON.parse(e.data));
-  ws.onclose   = () => setTimeout(connectWS, 2000);
+
+  ws.onopen = () => {
+    setWsStatus("connected");
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  };
+
+  ws.onmessage = (e) => {
+    setWsStatus("connected");
+    draw(JSON.parse(e.data));
+  };
+
+  ws.onclose = () => {
+    setWsStatus("reconnecting");
+    wsReconnectTimer = setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => {
+    setWsStatus("reconnecting");
+  };
 }
 
 // ── Location search via Nominatim ─────────────────────────────────────────────
