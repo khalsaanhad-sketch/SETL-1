@@ -46,6 +46,7 @@ let selectedAcId     = null;
 let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData       = null;
+let _oskyAuthHeader  = null;   // set from /api/opensky-creds on init
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(v) {
@@ -228,7 +229,7 @@ let _oskyLastCall = 0;
 
 async function fetchOpenSkyDirect() {
   const now = Date.now();
-  // Anonymous rate limit: 1 req / 10 s.  We use 15 s for safety.
+  // Registered users: 1 req / 10 s.  We use 15 s for safety.
   if (now - _oskyLastCall < 15_000) return [];
   _oskyLastCall = now;
 
@@ -238,8 +239,11 @@ async function fetchOpenSkyDirect() {
     `?lamin=${(currentLat - d).toFixed(4)}&lomin=${(currentLon - d).toFixed(4)}` +
     `&lamax=${(currentLat + d).toFixed(4)}&lomax=${(currentLon + d).toFixed(4)}`;
 
+  const headers = {};
+  if (_oskyAuthHeader) headers["Authorization"] = _oskyAuthHeader;
+
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return [];
     const data = await res.json();
     if (!data.states) return [];
@@ -531,9 +535,16 @@ async function searchLocation(query) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  const res  = await fetch("/api/session");
-  const data = await res.json();
-  sessionId  = data.session_id;
+  // Session + OpenSky credentials load in parallel
+  const [sessRes, credsRes] = await Promise.all([
+    fetch("/api/session"),
+    fetch("/api/opensky-creds"),
+  ]);
+  const data  = await sessRes.json();
+  const creds = await credsRes.json();
+
+  sessionId       = data.session_id;
+  _oskyAuthHeader = creds.auth || null;   // null = anonymous fallback
 
   const field = document.getElementById("sessionId");
   field.value    = sessionId.slice(0, 8) + "…";

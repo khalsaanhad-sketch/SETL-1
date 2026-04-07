@@ -3,7 +3,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
+import base64
 import httpx
+import os
 import uuid
 import random
 
@@ -127,14 +129,25 @@ def favicon():
     return FileResponse("cloud_app/static/favicon.ico")
 
 
+def _opensky_basic_auth() -> str | None:
+    """Return a Basic-Auth header value if credentials are configured."""
+    user = os.environ.get("OPENSKY_USER", "").strip()
+    pw   = os.environ.get("OPENSKY_PASS", "").strip()
+    if user and pw:
+        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        return f"Basic {token}"
+    return None
+
+
 @app.get("/api/aircraft")
 async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
-    sources = [
+    adsb_sources = [
         f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}",
         f"https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{radius}",
     ]
-    async with httpx.AsyncClient(timeout=6.0) as client:
-        for url in sources:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        # ── Primary / secondary: ADS-B aggregators ───────────────────────────
+        for url in adsb_sources:
             try:
                 resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
                 data = resp.json()
@@ -142,7 +155,50 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
                     return data
             except Exception:
                 continue
+
+        # ── Tertiary: OpenSky authenticated (may bypass datacenter IP block) ─
+        auth = _opensky_basic_auth()
+        if auth:
+            try:
+                d   = 1.8   # ~200 km bounding box
+                url = (
+                    "https://opensky-network.org/api/states/all"
+                    f"?lamin={lat - d:.4f}&lomin={lon - d:.4f}"
+                    f"&lamax={lat + d:.4f}&lomax={lon + d:.4f}"
+                )
+                resp = await client.get(url, headers={"Authorization": auth,
+                                                       "User-Agent": "SETL-EFB/1.0"})
+                data = resp.json()
+                states = data.get("states") or []
+                ac = []
+                for s in states:
+                    # state vector: [icao24, callsign, …, lon(5), lat(6),
+                    #                baro_alt_m(7), on_ground(8), vel_m_s(9), track(10)]
+                    if s[6] is None or s[5] is None or s[8]:
+                        continue
+                    ac.append({
+                        "hex":      s[0],
+                        "flight":   (s[1] or "").strip(),
+                        "lat":      s[6],
+                        "lon":      s[5],
+                        "alt_baro": round(s[7] * 3.28084) if s[7] else 0,
+                        "gs":       round(s[9] * 1.944)   if s[9] else 0,
+                        "track":    s[10] or 0,
+                    })
+                if ac:
+                    return {"ac": ac, "source": "opensky"}
+            except Exception:
+                pass
+
     return {"ac": []}
+
+
+@app.get("/api/opensky-creds")
+async def opensky_creds():
+    """Return a pre-built Basic-Auth header for browser-side OpenSky fetches.
+    The actual credentials never appear in the JS bundle."""
+    auth = _opensky_basic_auth()
+    return {"auth": auth}
 
 
 @app.get("/api/session")
