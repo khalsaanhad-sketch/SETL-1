@@ -229,11 +229,17 @@ async function selectAircraft(ac) {
     }),
   });
 
+  // Clear stale home-position cells so the off-screen grid doesn't linger.
+  // Fresh cells for the aircraft's position arrive on the next WebSocket tick (≤1.5 s).
+  terrainLayer.clearLayers();
+  lzLayer.clearLayers();
+
   // Zoom 10: shows ~80 km radius — risk grid readable + city/terrain context
   map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
-  if (latestData) draw(latestData);
+  // Do NOT redraw with latestData here — it holds home-position cells that are
+  // now off-screen. The WebSocket delivers aircraft-position cells within 1.5 s.
 }
 
 // ── OpenSky client-side fetch ─────────────────────────────────────────────────
