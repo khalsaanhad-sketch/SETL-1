@@ -20,8 +20,24 @@ from cloud_app.services.weather_engine import get_weather
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="cloud_app/static"), name="static")
 templates = Jinja2Templates(directory="cloud_app/templates")
+
+
+app.mount("/static", StaticFiles(directory="cloud_app/static"), name="static")
+
+
+# ── main.js: served from a non-static path so no ETag/304 caching occurs ──────
+@app.get("/js/main.js", include_in_schema=False)
+async def serve_main_js():
+    return FileResponse(
+        "cloud_app/static/main.js",
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 sessions = {}
 
@@ -120,11 +136,9 @@ def generate_cells(state, terrain, prob):
     return cells
 
 
-_BUILD_TS = int(time.time())  # set once at startup; forces browser to reload static assets
-
 @app.get("/")
 def home(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"v": _BUILD_TS})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
