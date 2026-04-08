@@ -53,6 +53,28 @@ body {
   color: #e8eefb;
 }
 
+/* Compact Connect button that sits inline beside the Live status dot */
+button.btn-inline-connect {
+  font-size: 0.62rem !important;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 2px 9px !important;
+  border-radius: 4px !important;
+  border: 1px solid #3a4f7a !important;
+  background: transparent !important;
+  color: #7ba7e0 !important;
+  cursor: pointer;
+  line-height: 1.6;
+  min-height: unset !important;
+  width: auto !important;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+button.btn-inline-connect:hover {
+  background: #1e3a6e !important;
+  color: #b8d4f8 !important;
+  border-color: #5578a8 !important;
+}
+
 .mapShell {
   position: relative;
   min-width: 0;

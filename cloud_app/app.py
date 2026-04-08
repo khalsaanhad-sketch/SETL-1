@@ -120,9 +120,11 @@ def generate_cells(state, terrain, prob):
     return cells
 
 
+_BUILD_TS = int(time.time())  # set once at startup; forces browser to reload static assets
+
 @app.get("/")
 def home(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"v": _BUILD_TS})
 
 
 @app.get("/favicon.ico", include_in_schema=False)

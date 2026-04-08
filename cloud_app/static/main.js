@@ -668,7 +668,8 @@ document.getElementById("connectBtn").addEventListener("click", async () => {
   document.getElementById("appNotice").textContent = "Reconnected.";
 });
 
-document.getElementById("demoBtn").addEventListener("click", async () => {
+const _demoBtnEl = document.getElementById("demoBtn");
+if (_demoBtnEl) _demoBtnEl.addEventListener("click", async () => {
   // Demo: Delhi area, busy traffic zone
   const lat = 28.5562, lon = 77.1000;
   currentLat  = lat;  currentLon  = lon;

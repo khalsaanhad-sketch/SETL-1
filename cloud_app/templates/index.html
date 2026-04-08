@@ -12,16 +12,12 @@
   <body>
     <div class="layout">
       <aside class="panel">
-        <h1>SETL <span id="wsStatus" style="display:inline-flex;align-items:center;gap:5px;font-size:0.72rem;font-weight:500;letter-spacing:0.04em;vertical-align:middle;margin-left:6px;"><span id="wsDot" style="width:8px;height:8px;border-radius:50%;background:#ff9c00;display:inline-block;"></span><span id="wsLabel" style="color:#99a8c6;">Connecting…</span></span></h1>
+        <h1>SETL <span id="wsStatus" style="display:inline-flex;align-items:center;gap:5px;font-size:0.72rem;font-weight:500;letter-spacing:0.04em;vertical-align:middle;margin-left:6px;"><span id="wsDot" style="width:8px;height:8px;border-radius:50%;background:#ff9c00;display:inline-block;"></span><span id="wsLabel" style="color:#99a8c6;">Connecting…</span><button id="connectBtn" class="btn-inline-connect" style="font-size:0.62rem;font-weight:600;padding:2px 10px;min-height:unset;width:auto;border-radius:4px;border:1px solid #3a4f7a;background:transparent;color:#7ba7e0;letter-spacing:0.05em;line-height:1.6;cursor:pointer;">Connect</button></span></h1>
         <p class="sub">Smart Emergency Terrain Landing — real-time EFB with live fusion and terrain risk grid.</p>
 
         <div class="card">
           <label>Session ID</label>
           <input id="sessionId" value="setl-live-1" />
-          <div class="buttons">
-            <button id="connectBtn">Connect</button>
-            <button id="demoBtn">Start Demo</button>
-          </div>
         </div>
 
         <div class="card">
@@ -51,6 +47,11 @@
           <div id="decisionBox" class="mini"></div>
         </div>
 
+        <div class="card">
+          <h2>Ops view</h2>
+          <div id="opsInfo" class="mini"></div>
+        </div>
+
         <div class="card stats">
           <div><span>Source</span><strong id="source">--</strong></div>
           <div><span>Status</span><strong id="status">--</strong></div>
@@ -77,11 +78,6 @@
           <h2>Top zones</h2>
           <div id="zones" class="lz-list"></div>
         </div>
-
-        <div class="card">
-          <h2>Ops view</h2>
-          <div id="opsInfo" class="mini"></div>
-        </div>
       </aside>
 
       <main class="mapShell">
@@ -97,6 +93,6 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <script src="/static/main.js"></script>
+    <script src="/static/main.js?v={{ v }}"></script>
   </body>
 </html>
