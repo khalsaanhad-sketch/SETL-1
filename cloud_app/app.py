@@ -74,7 +74,7 @@ def generate_cells(state, terrain, prob, weather=None,
     is_water   = terrain.get("is_water", False)
     base_slope = terrain.get("slope_deg", 0.0)
     elev       = terrain.get("elevation_m", 0.0)
-    wind_ms    = float((weather or {}).get("wind_speed", 5.0))
+    wind_ms    = float((weather or {}).get("wind_speed_kts", 5.0)) * 0.5144  # kts → m/s
 
     steps = 4
     size  = 0.01
@@ -398,11 +398,11 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     get_terrain_grid(lat, lon),
                 )
 
-                risk = compute_risk(state)
+                risk = compute_risk(state, weather)
                 prob = compute_probability(risk)
                 options = compute_options(prob)
-                alerts = compute_alerts(risk, prob)
-                guidance = compute_guidance(state, terrain)
+                alerts = compute_alerts(risk, prob, weather)
+                guidance = compute_guidance(state, terrain, weather)
 
                 cells = generate_cells(
                     state, terrain, prob["success"],
