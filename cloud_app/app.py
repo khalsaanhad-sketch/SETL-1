@@ -15,8 +15,9 @@ from cloud_app.services.guidance_engine import compute_guidance
 from cloud_app.services.alert_engine import compute_alerts
 from cloud_app.services.probability_engine import compute_probability
 from cloud_app.services.options_engine import compute_options
-from cloud_app.services.terrain_engine import get_terrain
+from cloud_app.services.terrain_engine import get_terrain, get_terrain_grid
 from cloud_app.services.weather_engine import get_weather
+from cloud_app.services.decision_engine import score_cells
 
 app = FastAPI()
 
@@ -54,84 +55,98 @@ def ensure_session(sid):
     return sessions[sid]
 
 
-def generate_cells(state, terrain, prob):
-    lat      = state["latitude"]
-    lon      = state["longitude"]
-    is_water = terrain.get("is_water", False)
-    # slope_deg is derived by terrain_engine from DEM data
+def generate_cells(state, terrain, prob, weather=None,
+                   slope_grid=None, roughness_grid=None):
+    """
+    Build a 9×9 risk grid centred on the aircraft.
+
+    Scoring pipeline (when slope/roughness grids are available):
+        AHP weights → TOPSIS relative ranking → Logistic → risk = 1 - probability
+
+    Falls back to the elevation-derived slope from terrain_engine when the
+    DEM grid could not be fetched (API timeout, rate-limit, etc.).
+
+    Output format is unchanged — the frontend receives the same cell dict
+    structure as before.
+    """
+    lat        = state["latitude"]
+    lon        = state["longitude"]
+    is_water   = terrain.get("is_water", False)
     base_slope = terrain.get("slope_deg", 0.0)
     elev       = terrain.get("elevation_m", 0.0)
+    wind_ms    = float((weather or {}).get("wind_speed", 5.0))
 
-    cells = []
+    steps = 4
     size  = 0.01
 
-    for i in range(-4, 5):
-        for j in range(-4, 5):
+    # ── Distance helper (flat-earth, km) ──────────────────────────────────────
+    def dist_km(i, j):
+        return ((i * size * 111.0) ** 2 + (j * size * 111.0) ** 2) ** 0.5
+
+    # ── Build cell list with all feature fields ───────────────────────────────
+    cells = []
+    for i in range(-steps, steps + 1):
+        for j in range(-steps, steps + 1):
             cell_lat = lat + i * size
             cell_lon = lon + j * size
+            gi, gj   = i + steps, j + steps   # grid indices (0–8)
+
+            corners = [
+                [cell_lat,        cell_lon],
+                [cell_lat + size, cell_lon],
+                [cell_lat + size, cell_lon + size],
+                [cell_lat,        cell_lon + size],
+            ]
 
             if is_water:
-                # Ocean / water body — ditching is always high-risk
-                # Vary depth slightly for visual texture
-                local_depth = abs(elev) + random.uniform(-150, 150)
-                local_depth = max(0, local_depth)
-
-                # Risk: water is always dangerous; deeper = slightly worse
-                risk = round(min(1.0, max(0.75, 1.0 - prob * 0.25)), 2)
-
-                # Blue depth palette
-                if local_depth < 50:
-                    color = "#06b6d4"   # shallow coastal — cyan
-                elif local_depth < 500:
-                    color = "#0284c7"   # continental shelf — sky blue
-                elif local_depth < 2000:
-                    color = "#1d4ed8"   # mid ocean — blue
-                else:
-                    color = "#1e3a5f"   # deep ocean — navy
-
+                local_depth = max(0.0, abs(elev) + random.uniform(-150, 150))
                 cells.append({
-                    "corners": [
-                        [cell_lat,        cell_lon],
-                        [cell_lat + size, cell_lon],
-                        [cell_lat + size, cell_lon + size],
-                        [cell_lat,        cell_lon + size],
-                    ],
-                    "risk":     risk,
-                    "color":    color,
-                    "slope":    0.0,
-                    "is_water": True,
-                    "depth_m":  round(local_depth, 0),
+                    "corners":   corners,
+                    "is_water":  True,
+                    "depth_m":   round(local_depth, 0),
+                    # TOPSIS inputs
+                    "slope":     0.0,
+                    "roughness": 0.0,
+                    "distance":  dist_km(i, j),
+                    "wind":      wind_ms,
+                    "crowd":     0.0,
+                    "obstacle":  0.0,
+                    # placeholders — overwritten by score_cells()
+                    "risk":      0.9,
+                    "color":     "#1d4ed8",
                 })
             else:
-                # Land — slope_deg from terrain engine, normalised to [0, 1]
-                slope = max(0.0, base_slope + random.uniform(-1.0, 1.0))
-
-                # Slope contribution: 0° = 0.0, 30° = 1.0
-                slope_risk = min(1.0, slope / 30.0)
-                # Combine probability failure with slope hazard
-                risk = round(min(1.0, (1.0 - prob) * 0.7 + slope_risk * 0.3), 2)
-
-                if risk > 0.6:
-                    color = "#ba2627"
-                elif risk > 0.45:
-                    color = "#ff9c00"
-                elif risk > 0.25:
-                    color = "#d8d62b"
+                # Per-cell slope from DEM grid when available; else base value
+                if slope_grid is not None:
+                    slope = max(0.0, float(slope_grid[gi, gj])
+                                + random.uniform(-0.5, 0.5))
                 else:
-                    color = "#2cb64f"
+                    slope = max(0.0, base_slope + random.uniform(-1.0, 1.0))
+
+                roughness = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
 
                 cells.append({
-                    "corners": [
-                        [cell_lat,        cell_lon],
-                        [cell_lat + size, cell_lon],
-                        [cell_lat + size, cell_lon + size],
-                        [cell_lat,        cell_lon + size],
-                    ],
-                    "risk":     risk,
-                    "color":    color,
-                    "slope":    round(slope, 2),
-                    "is_water": False,
+                    "corners":   corners,
+                    "is_water":  False,
+                    # TOPSIS inputs
+                    "slope":     round(slope, 2),
+                    "roughness": round(roughness, 2),
+                    "distance":  dist_km(i, j),
+                    "wind":      wind_ms,
+                    "crowd":     0.0,
+                    "obstacle":  0.0,
+                    # placeholders — overwritten by score_cells()
+                    "risk":      0.5,
+                    "color":     "#d8d62b",
                 })
+
+    # ── AHP → TOPSIS → Logistic ───────────────────────────────────────────────
+    cells = score_cells(cells)
+
+    # ── Strip internal-only TOPSIS input fields before sending to frontend ────
+    for c in cells:
+        for key in ("roughness", "distance", "wind", "crowd", "obstacle"):
+            c.pop(key, None)
 
     return cells
 
@@ -372,8 +387,16 @@ async def ws_endpoint(ws: WebSocket, sid: str):
     try:
         while True:
             try:
-                terrain = await get_terrain(state["latitude"], state["longitude"])
-                weather = await get_weather(state["latitude"], state["longitude"])
+                lat, lon = state["latitude"], state["longitude"]
+
+                # Fetch terrain (single-point), weather, and DEM grid in parallel.
+                # get_terrain_grid is cached by position so the batch API call
+                # only fires when the aircraft has moved >~5 km.
+                (terrain, weather, (slope_grid, roughness_grid)) = await asyncio.gather(
+                    get_terrain(lat, lon),
+                    get_weather(lat, lon),
+                    get_terrain_grid(lat, lon),
+                )
 
                 risk = compute_risk(state)
                 prob = compute_probability(risk)
@@ -381,7 +404,12 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 alerts = compute_alerts(risk, prob)
                 guidance = compute_guidance(state, terrain)
 
-                cells = generate_cells(state, terrain, prob["success"])
+                cells = generate_cells(
+                    state, terrain, prob["success"],
+                    weather=weather,
+                    slope_grid=slope_grid,
+                    roughness_grid=roughness_grid,
+                )
 
                 result = {
                     "alerts": alerts,

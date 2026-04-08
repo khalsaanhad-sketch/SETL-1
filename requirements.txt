@@ -3,6 +3,7 @@ uvicorn[standard]
 websockets
 httpx
 numpy
+scipy
 pillow
 jinja2
 python-multipart
