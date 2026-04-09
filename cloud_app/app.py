@@ -77,7 +77,11 @@ def generate_cells(state, terrain, prob, weather=None,
     base_slope     = terrain.get("slope_deg", 0.0)
     elev           = terrain.get("elevation_m", 0.0)
     elevation_live = terrain.get("elevation_live", False)
-    wind_ms    = float((weather or {}).get("wind_speed_kts", 5.0)) * 0.5144  # kts → m/s
+    wind_ms        = float((weather or {}).get("wind_speed_kts", 5.0)) * 0.5144  # kts → m/s
+
+    # Confidence flags — set once and stamped onto every cell
+    terrain_conf  = "real" if slope_grid is not None else ("approx" if elevation_live else "low")
+    weather_conf  = (weather or {}).get("confidence", "low")
 
     steps = 4
     size  = 0.01
@@ -118,6 +122,8 @@ def generate_cells(state, terrain, prob, weather=None,
                     "is_water":         True,
                     "depth_m":          round(local_depth, 0) if local_depth is not None else None,
                     "water_confidence": water_confidence,
+                    "terrain_confidence": terrain_conf,
+                    "weather_confidence": weather_conf,
                     # TOPSIS inputs
                     "slope":     0.0,
                     "roughness": 0.0,
@@ -146,9 +152,14 @@ def generate_cells(state, terrain, prob, weather=None,
                 crowd_val    = round(float(crowd_grid[gi, gj]),    3) if crowd_grid    is not None else 0.0
                 obstacle_val = round(float(obstacle_grid[gi, gj]), 3) if obstacle_grid is not None else 0.0
 
+                obstacle_conf = "real" if obstacle_grid is not None else "low"
+
                 cells.append({
                     "corners":   corners,
                     "is_water":  False,
+                    "terrain_confidence":  terrain_conf,
+                    "weather_confidence":  weather_conf,
+                    "obstacle_confidence": obstacle_conf,
                     # TOPSIS inputs
                     "slope":     round(slope, 2),
                     "roughness": round(roughness, 2),
@@ -164,6 +175,14 @@ def generate_cells(state, terrain, prob, weather=None,
 
     # ── AHP → TOPSIS → Logistic ───────────────────────────────────────────────
     cells = score_cells(cells)
+
+    # ── Confidence score: average of all available layer confidences ──────────
+    _conf_map = {"real": 1.0, "approx": 0.6, "low": 0.3, "unknown": 0.2}
+    _conf_keys = ("terrain_confidence", "weather_confidence",
+                  "obstacle_confidence", "water_confidence")
+    for c in cells:
+        vals = [_conf_map[c[k]] for k in _conf_keys if k in c and c[k] in _conf_map]
+        c["confidence_score"] = round(sum(vals) / len(vals), 2) if vals else 0.3
 
     # ── Strip pure-TOPSIS internals before sending to frontend ──────────────
     # NOTE: "crowd" is intentionally retained so the frontend can display
