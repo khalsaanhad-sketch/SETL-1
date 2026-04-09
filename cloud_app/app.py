@@ -124,9 +124,9 @@ def generate_cells(state, terrain, prob, weather=None,
                 # Per-cell slope from DEM grid when available; else base value
                 if slope_grid is not None:
                     slope = max(0.0, float(slope_grid[gi, gj])
-                                + random.uniform(-0.5, 0.5))
+                                + random.uniform(-0.15, 0.15))
                 else:
-                    slope = max(0.0, base_slope + random.uniform(-1.0, 1.0))
+                    slope = max(0.0, base_slope + random.uniform(-0.5, 0.5))
 
                 roughness = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
 

@@ -8,7 +8,9 @@ Pipeline:
   1. AHP weights  — domain-justified importance per criterion (land vs water)
   2. TOPSIS       — ranks cells relative to ideal-best / ideal-worst
   3. Logistic     — maps the TOPSIS score to a non-linear probability in [0,1]
-  4. risk = 1 - probability
+  4. Absolute floor — prevents genuinely safe terrain being marked dangerous
+     purely due to relative comparison against equally-safe neighbours
+  5. risk = 1 - probability
 
 No changes to session management, WebSocket IDs, or any other engine.
 """
@@ -19,14 +21,15 @@ import numpy as np
 
 # ── AHP weights ────────────────────────────────────────────────────────────────
 # Columns must match the order of features built in score_cells() below.
+# surface_score removed — it is derived from slope and would double-count it.
 
-# Land: [slope, roughness, distance, crowd, obstacle, surface]
-_LAND_KEYS = ["slope", "roughness", "distance", "crowd", "obstacle", "surface"]
-_LAND_W    = [  0.35,      0.20,       0.15,     0.15,    0.05,       0.10  ]
+# Land: [slope, roughness, distance, crowd, obstacle]
+_LAND_KEYS = ["slope", "roughness", "distance", "crowd", "obstacle"]
+_LAND_W    = [  0.38,      0.22,       0.18,     0.14,    0.08  ]
 
-# Water: [distance, wind, surface, crowd, slope]
-_WATER_KEYS = ["distance", "wind", "surface", "crowd", "slope"]
-_WATER_W    = [   0.30,     0.25,    0.20,     0.15,    0.10  ]
+# Water: [distance, wind, crowd, slope]
+_WATER_KEYS = ["distance", "wind", "crowd", "slope"]
+_WATER_W    = [   0.35,     0.30,   0.20,    0.15  ]
 
 
 # ── TOPSIS ─────────────────────────────────────────────────────────────────────
@@ -62,6 +65,31 @@ def _logistic(x: float, k: float = 5.0) -> float:
     return 1.0 / (1.0 + math.exp(-k * (x - 0.5)))
 
 
+# ── Absolute safety floor ──────────────────────────────────────────────────────
+
+def _apply_land_floor(prob: float, slope: float, roughness: float,
+                      crowd: float, obstacle: float) -> float:
+    """
+    Prevent the purely relative TOPSIS comparison from marking genuinely safe
+    flat terrain as high-risk just because the neighbouring cells happen to be
+    similarly safe.
+
+    Thresholds are intentionally conservative:
+      • slope     : degrees
+      • roughness : metres (DEM std-dev in a 3×3 neighbourhood via etopo1)
+      • crowd/obs : normalised [0, 1]
+    """
+    # Very flat, clear terrain (runway / airstrip quality) → green floor
+    if slope < 2.0 and roughness < 3.0 and crowd < 0.15 and obstacle < 0.15:
+        return max(prob, 0.73)
+
+    # Flat, open terrain (good emergency LZ) → at worst amber
+    if slope < 5.0 and roughness < 8.0 and crowd < 0.35 and obstacle < 0.30:
+        return max(prob, 0.55)
+
+    return prob
+
+
 # ── Colour palette ─────────────────────────────────────────────────────────────
 
 def _risk_color(risk: float, is_water: bool) -> str:
@@ -81,13 +109,14 @@ def _risk_color(risk: float, is_water: bool) -> str:
 
 def score_cells(cells: list) -> list:
     """
-    Apply AHP → TOPSIS → Logistic to a list of cell dicts and return them
-    with 'risk', 'probability', and 'color' fields added / overwritten.
+    Apply AHP → TOPSIS → Logistic → absolute floor to a list of cell dicts
+    and return them with 'risk', 'probability', and 'color' fields added /
+    overwritten.
 
     Expected fields per cell (missing ones default to 0):
         is_water  bool
         slope     float   degrees
-        roughness float   elevation std-dev in 3×3 neighbourhood
+        roughness float   elevation std-dev in 3×3 neighbourhood (metres)
         distance  float   km from aircraft
         wind      float   m/s (from weather)
         crowd     float   [0,1]  (0 when no data — conservative default)
@@ -106,19 +135,25 @@ def score_cells(cells: list) -> list:
         crowd  = float(c.get("crowd",     0.0))
         obst   = float(c.get("obstacle",  0.0))
         wind   = float(c.get("wind",      0.0))
-        surf   = float(c.get("surface",   0.0))
 
         if c.get("is_water"):
             water_idx.append(idx)
-            water_rows.append([dist, wind, 1.0, crowd, slope])  # surface=1 constant
+            water_rows.append([dist, wind, crowd, slope])
         else:
             land_idx.append(idx)
-            land_rows.append([slope, rough, dist, crowd, obst, surf])
+            land_rows.append([slope, rough, dist, crowd, obst])
 
     if land_rows:
         scores = _topsis(np.array(land_rows, dtype=float), _LAND_W)
         for rank, idx in enumerate(land_idx):
             prob = _logistic(float(scores[rank]))
+
+            # Apply absolute floor so safe terrain isn't painted red by
+            # relative comparison with equally-safe neighbouring cells
+            s, r, c, o = (land_rows[rank][0], land_rows[rank][1],
+                          land_rows[rank][3], land_rows[rank][4])
+            prob = _apply_land_floor(prob, s, r, c, o)
+
             risk = round(1.0 - prob, 3)
             cells[idx]["risk"]        = risk
             cells[idx]["probability"] = round(prob, 3)
