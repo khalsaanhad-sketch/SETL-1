@@ -7,3 +7,12 @@ scipy
 pillow
 jinja2
 python-multipart
+fastapi
+httpx
+jinja2
+numpy
+pillow
+python-multipart
+scipy
+uvicorn[standard]
+websockets
