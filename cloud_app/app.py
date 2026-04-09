@@ -8,7 +8,6 @@ import httpx
 import os
 import time
 import uuid
-import random
 
 from cloud_app.services.risk_engine import compute_risk
 from cloud_app.services.guidance_engine import compute_guidance
@@ -74,9 +73,10 @@ def generate_cells(state, terrain, prob, weather=None,
     """
     lat        = state["latitude"]
     lon        = state["longitude"]
-    is_water   = terrain.get("is_water", False)
-    base_slope = terrain.get("slope_deg", 0.0)
-    elev       = terrain.get("elevation_m", 0.0)
+    is_water       = terrain.get("is_water", False)
+    base_slope     = terrain.get("slope_deg", 0.0)
+    elev           = terrain.get("elevation_m", 0.0)
+    elevation_live = terrain.get("elevation_live", False)
     wind_ms    = float((weather or {}).get("wind_speed_kts", 5.0)) * 0.5144  # kts → m/s
 
     steps = 4
@@ -102,12 +102,22 @@ def generate_cells(state, terrain, prob, weather=None,
             ]
 
             if is_water:
-                local_depth = max(0.0, abs(elev) + random.uniform(-150, 150))
+                # Use real GEBCO/etopo1 depth when the API responded with a
+                # negative elevation (below sea-level); otherwise depth is
+                # unknown — do not synthesise a fake value.
+                if elevation_live and elev < 0:
+                    local_depth      = abs(elev)   # real bathymetric depth (m)
+                    water_confidence = "real"
+                else:
+                    local_depth      = None        # API unavailable — depth unknown
+                    water_confidence = "unknown"
+
                 crowd_val = round(float(crowd_grid[gi, gj]), 3) if crowd_grid is not None else 0.0
                 cells.append({
-                    "corners":   corners,
-                    "is_water":  True,
-                    "depth_m":   round(local_depth, 0),
+                    "corners":          corners,
+                    "is_water":         True,
+                    "depth_m":          round(local_depth, 0) if local_depth is not None else None,
+                    "water_confidence": water_confidence,
                     # TOPSIS inputs
                     "slope":     0.0,
                     "roughness": 0.0,
@@ -123,10 +133,9 @@ def generate_cells(state, terrain, prob, weather=None,
             else:
                 # Per-cell slope from DEM grid when available; else base value
                 if slope_grid is not None:
-                    slope = max(0.0, float(slope_grid[gi, gj])
-                                + random.uniform(-0.15, 0.15))
+                    slope = max(0.0, float(slope_grid[gi, gj]))
                 else:
-                    slope = max(0.0, base_slope + random.uniform(-0.5, 0.5))
+                    slope = max(0.0, base_slope)
 
                 roughness = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
 

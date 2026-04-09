@@ -99,6 +99,7 @@ async def get_terrain(lat: float, lon: float) -> dict:
         "surface_type":   surface_type,
         "is_water":       is_water,
         "landing_viable": landing_viable,
+        "elevation_live": elevation_live,
     }
 
 
