@@ -435,6 +435,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
     try:
         while True:
             try:
+                _tick_start = time.monotonic()
                 lat, lon = state["latitude"], state["longitude"]
 
                 # ── Crowd density: non-blocking background fetch ──────────────
@@ -510,21 +511,76 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "runway_ready":  bool(runways),
                 }
 
+                # ── Pre-log derived fields ────────────────────────────────────
+                _tick_ms = round((time.monotonic() - _tick_start) * 1000)
+
+                # Best non-water cell by probability
+                _land_cells  = [c for c in cells if not c.get("is_water", False)]
+                _best_cell   = max(_land_cells, key=lambda c: c["probability"]) if _land_cells else None
+                _best_prob   = round(_best_cell["probability"], 4) if _best_cell else None
+                _best_color  = _best_cell.get("color") if _best_cell else None
+
+                # Straight-line distance from aircraft to best-cell centre (nm)
+                _best_dist_nm = None
+                if _best_cell:
+                    _bc = _best_cell["corners"]
+                    _bc_lat = (_bc[0][0] + _bc[2][0]) / 2
+                    _bc_lon = (_bc[0][1] + _bc[2][1]) / 2
+                    _best_dist_nm = round(
+                        _runway_engine._haversine(lat, lon, _bc_lat, _bc_lon) / 1.852, 2
+                    )
+
+                # Cell colour distribution (probability thresholds)
+                _n_green  = sum(1 for c in cells if c["probability"] >= 0.60)
+                _n_yellow = sum(1 for c in cells if 0.35 <= c["probability"] < 0.60)
+                _n_red    = sum(1 for c in cells if c["probability"] < 0.35)
+
+                # Top recommended option type
+                _top_opt  = options[0]["type"] if options else None
+
+                # Visibility: weather engine stores metres; log in statute miles
+                _vis_m    = weather.get("visibility_m")
+                _vis_sm   = round(_vis_m / 1609.34, 2) if _vis_m is not None else None
+
                 log_entry({
-                    "ts":           time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "session":      sid,
-                    "lat":          lat,
-                    "lon":          lon,
-                    "alt_ft":       state.get("altitude"),
-                    "speed_kts":    state.get("speed"),
-                    "flight_state": risk.get("flight_state"),
-                    "risk_level":   risk.get("risk_level"),
-                    "prob_success": prob.get("success"),
-                    "wx_source":    weather.get("source"),
-                    "wx_ceiling_ft":weather.get("ceiling_ft"),
-                    "wx_wind_kts":  weather.get("wind_kts"),
-                    "crowd_ready":  crowd_grid is not None,
-                    "runway_ready": bool(runways),
+                    # ── Position & identity ──────────────────────────────────
+                    "ts":              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "session":         sid,
+                    "callsign":        state.get("callsign"),
+                    "icao24":          state.get("icao24"),
+                    "lat":             lat,
+                    "lon":             lon,
+                    # ── Aircraft state ───────────────────────────────────────
+                    "alt_ft":          state.get("altitude"),
+                    "speed_kts":       state.get("speed"),
+                    "heading_deg":     state.get("heading_deg"),
+                    "vs_fpm":          state.get("vs_fpm"),
+                    # ── Risk & probability ───────────────────────────────────
+                    "flight_state":    risk.get("flight_state"),
+                    "risk_level":      risk.get("risk_level"),
+                    "prob_success":    prob.get("success"),
+                    # ── Decision quality ─────────────────────────────────────
+                    "best_cell_prob":     _best_prob,
+                    "best_cell_color":    _best_color,
+                    "best_cell_dist_nm":  _best_dist_nm,
+                    "n_green_cells":      _n_green,
+                    "n_yellow_cells":     _n_yellow,
+                    "n_red_cells":        _n_red,
+                    "top_option":         _top_opt,
+                    # ── Weather ──────────────────────────────────────────────
+                    "wx_source":       weather.get("source"),
+                    "wx_confidence":   weather.get("confidence"),
+                    "wx_ceiling_ft":   weather.get("ceiling_ft"),
+                    "wx_wind_kts":     weather.get("wind_speed_kts"),   # fixed key
+                    "wx_wind_dir_deg": weather.get("wind_direction_deg"),
+                    "wx_visibility_sm":_vis_sm,
+                    # ── Terrain & data provenance ────────────────────────────
+                    "terrain_live":    terrain.get("elevation_live"),
+                    # ── System health ────────────────────────────────────────
+                    "tick_ms":         _tick_ms,
+                    "n_runways_near":  len(runways),
+                    "crowd_ready":     crowd_grid is not None,
+                    "runway_ready":    bool(runways),
                 })
                 await ws.send_json(result)
 
