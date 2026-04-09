@@ -55,6 +55,8 @@ let _riskLon    = 77.2090;
 // Previous position of the selected aircraft — used to detect movement for live-state re-POST.
 let _selPrevLat = null;
 let _selPrevLon = null;
+// When true, fetchAircraft() will auto-select the nearest aircraft after the feed loads.
+let _autoSelectFirst = false;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(v) {
@@ -371,6 +373,12 @@ async function fetchAircraft() {
 
     drawTraffic();
     drawTrafficList();
+
+    // Auto-select the nearest aircraft after a location change
+    if (_autoSelectFirst && aircraftFeed.length > 0) {
+      _autoSelectFirst = false;
+      selectAircraft(aircraftFeed[0]);
+    }
   } catch (_) {
     // silent — keep previous aircraft state on transient errors
   } finally {
@@ -616,7 +624,8 @@ async function searchLocation(query) {
     currentLat = lat;
     currentLon = lon;
 
-    // Clear stale cache; force immediate OpenSky refresh for new location
+    // ── Immediate UI clear — don't leave stale data from the old location ──
+    aircraftFeed     = [];
     _cachedOskyLocal = [];
     _oskyLastCall    = 0;
     selectedAcId     = null;
@@ -625,12 +634,27 @@ async function searchLocation(query) {
     _riskLat         = lat;
     _riskLon         = lon;
 
+    // Clear the aircraft list immediately so old flights vanish at once
+    drawTrafficList();
+
+    // Clear stale terrain grid cells
+    terrainLayer.clearLayers();
+    lzLayer.clearLayers();
+
+    // Blank the Decision and Ops panels so stale analysis doesn't linger
+    const loading = "<em style='color:#667'>Loading…</em>";
+    document.getElementById("decisionBox").innerHTML = loading;
+    document.getElementById("opsInfo").innerHTML     = loading;
+
+    // Tell backend about the new location before the next WS tick
     await fetch(`/api/live-state/${sessionId}`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ latitude: lat, longitude: lon }),
     });
 
+    // Fetch aircraft — auto-select nearest when results arrive
+    _autoSelectFirst = true;
     fetchAircraft();
     notice.textContent = `Moved to: ${label}`;
   } catch (_) {
