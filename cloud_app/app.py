@@ -19,6 +19,8 @@ from cloud_app.services.weather_engine import get_weather
 from cloud_app.services.decision_engine import score_cells
 from cloud_app.services.crowd_engine import get_osm_crowd_grid
 import cloud_app.services.crowd_engine as _crowd_engine
+from cloud_app.services.runway_engine import apply_runway_bonus, get_cached_runways
+import cloud_app.services.runway_engine as _runway_engine
 
 app = FastAPI()
 
@@ -453,6 +455,16 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     asyncio.create_task(get_osm_crowd_grid(lat, lon))
                     crowd_grid, obstacle_grid = None, None
 
+                # ── Runway data: background load + instant cache read ─────────
+                # OurAirports CSV (~2 MB) is downloaded once on the first tick
+                # and held in memory for the session.  All subsequent ticks do
+                # an instant in-memory filter (<1 ms).  Overpass is used as
+                # fallback when OA has no runway in the current area.
+                if _runway_engine._OA_DB is None and not _runway_engine._OA_LOADING:
+                    _runway_engine._OA_LOADING = True
+                    asyncio.create_task(_runway_engine.get_nearby_runways(lat, lon))
+                runways = get_cached_runways(lat, lon)
+
                 # Terrain, weather, and DEM run in parallel — none blocked by Overpass
                 terrain, weather, (slope_grid, roughness_grid) = await asyncio.gather(
                     get_terrain(lat, lon),
@@ -475,6 +487,9 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     obstacle_grid=obstacle_grid,
                 )
 
+                # Post-TOPSIS runway proximity bonus (no-op when runways=[])
+                cells = apply_runway_bonus(cells, runways)
+
                 result = {
                     "alerts":       alerts,
                     "guidance":     guidance,
@@ -486,7 +501,10 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "cells":        cells,
                     # crowd_ready: False means OSM Overpass is still fetching in
                     # the background; frontend shows "Fetching…" instead of 0%.
-                    "crowd_ready":  crowd_grid is not None,
+                    "crowd_ready":   crowd_grid is not None,
+                    # runway_ready: True once OurAirports CSV is loaded or
+                    # Overpass has returned data for this position.
+                    "runway_ready":  bool(runways),
                 }
 
                 await ws.send_json(result)
