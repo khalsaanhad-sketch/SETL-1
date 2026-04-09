@@ -36,7 +36,10 @@ so generate_cells() falls back gracefully to crowd = 0.0 / obstacle = 0.0.
 import httpx
 import numpy as np
 
-_CROWD_CACHE: dict = {"key": None, "crowd": None, "obstacle": None}
+# "pending" = cache key of an in-flight Overpass request launched as a background
+# asyncio.Task by the WS loop.  Prevents duplicate concurrent requests for the
+# same grid position when the WS ticks faster than Overpass responds.
+_CROWD_CACHE: dict = {"key": None, "crowd": None, "obstacle": None, "pending": None}
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # Saturation thresholds — count at which a cell reaches score = 1.0
@@ -69,6 +72,9 @@ async def get_osm_crowd_grid(
     key = _grid_cache_key(lat, lon, cell_size)
     if _CROWD_CACHE["key"] == key and _CROWD_CACHE["crowd"] is not None:
         return _CROWD_CACHE["crowd"], _CROWD_CACHE["obstacle"]
+
+    # Mark this key as in-flight so the WS loop won't fire a second parallel request
+    _CROWD_CACHE["pending"] = key
 
     dim  = 2 * steps + 1  # 9
     half = cell_size * 0.5
@@ -113,7 +119,7 @@ async def get_osm_crowd_grid(
             if "error" in remark.lower() or "out of memory" in remark.lower():
                 raise RuntimeError(f"Overpass remark: {remark[:120]}")
     except Exception:
-        _CROWD_CACHE.update({"key": key, "crowd": None, "obstacle": None})
+        _CROWD_CACHE.update({"key": key, "crowd": None, "obstacle": None, "pending": None})
         return None, None
 
     amenity_counts  = np.zeros((dim, dim), dtype=float)
@@ -162,5 +168,5 @@ async def get_osm_crowd_grid(
     # A cell is "crowded" if it has many amenities OR it is inside a residential zone
     crowd_grid = np.maximum(amenity_score, landuse_score)
 
-    _CROWD_CACHE.update({"key": key, "crowd": crowd_grid, "obstacle": obstacle_grid})
+    _CROWD_CACHE.update({"key": key, "crowd": crowd_grid, "obstacle": obstacle_grid, "pending": None})
     return crowd_grid, obstacle_grid

@@ -107,6 +107,8 @@ async function fetchNearestAirport(lat, lon) {
     const resp = await fetch(_OVERPASS, {
       method: "POST", body: q, headers: { "Content-Type": "text/plain" },
     });
+    // Stale-result guard: discard if user switched location while we were fetching
+    if (_airportFetchKey !== key) return;
     const els  = (await resp.json()).elements || [];
     let best   = null, bestDist = Infinity;
     for (const el of els) {
@@ -131,6 +133,8 @@ async function fetchNearestRoad(lat, lon) {
     const resp = await fetch(_OVERPASS, {
       method: "POST", body: q, headers: { "Content-Type": "text/plain" },
     });
+    // Stale-result guard: discard if user switched location while we were fetching
+    if (_roadFetchKey !== key) return;
     const els  = (await resp.json()).elements || [];
     let best   = null, bestDist = Infinity;
     for (const el of els) {
@@ -551,12 +555,15 @@ function draw(data) {
   // A — Safest LZ coordinates (from lowest-risk land cell, updated every WS tick)
   let lzHtml = "";
   if (!isOcean && sortedLand.length) {
-    const sc   = sortedLand[0];
-    const cLat = ((sc.corners[0][0] + sc.corners[2][0]) / 2).toFixed(4);
-    const cLon = ((sc.corners[0][1] + sc.corners[2][1]) / 2).toFixed(4);
+    const sc     = sortedLand[0];
+    const rawLat = (sc.corners[0][0] + sc.corners[2][0]) / 2;
+    const rawLon = (sc.corners[0][1] + sc.corners[2][1]) / 2;
+    // Use cardinal directions so southern/western hemisphere coords display correctly
+    const latStr = `${Math.abs(rawLat).toFixed(4)}°${rawLat >= 0 ? "N" : "S"}`;
+    const lonStr = `${Math.abs(rawLon).toFixed(4)}°${rawLon >= 0 ? "E" : "W"}`;
     lzHtml = `<div class="lz-item" style="margin-top:6px">` +
       `<strong>Safest LZ</strong>` +
-      `<span>${cLat}°N, ${cLon}°E &mdash; Risk ${sc.risk}</span>` +
+      `<span>${latStr}, ${lonStr} &mdash; Risk ${sc.risk}</span>` +
       `</div>`;
   } else if (isOcean) {
     lzHtml = `<div class="lz-item" style="margin-top:6px">` +
@@ -650,21 +657,26 @@ function draw(data) {
   ));
 
   // ── C4b: Crowd Density — max OSM crowd score across the 9×9 risk grid ────
-  // "crowd" is the per-cell OSM signal (amenity nodes + residential landuse),
-  // retained in the WS cells payload so we can surface it here.
-  const crowdScores  = (data.cells || []).map(c => c.crowd ?? 0);
-  const maxCrowd     = crowdScores.length ? Math.max(...crowdScores) : null;
-  const meanCrowd    = crowdScores.length ? crowdScores.reduce((a,b)=>a+b,0)/crowdScores.length : null;
-  if (maxCrowd != null) {
-    const crowdLabel = `max ${Math.round(maxCrowd * 100)}%  avg ${Math.round(meanCrowd * 100)}%`;
-    layersEl.appendChild(_scoredRow(
-      "Crowd Density",
-      crowdLabel,
-      maxCrowd,   // score: 0=empty→green, 1=dense→red
-      true        // higher crowd = higher risk
-    ));
+  // "crowd" is the per-cell OSM signal (amenity nodes + residential landuse).
+  // crowd_ready=false means Overpass is still fetching in the background;
+  // show "Fetching…" rather than a misleading 0% score.
+  if (!data.crowd_ready) {
+    layersEl.appendChild(_scoredRow("Crowd Density", "Fetching\u2026", null));
   } else {
-    layersEl.appendChild(_scoredRow("Crowd Density", "No data", null));
+    const crowdScores = (data.cells || []).map(c => c.crowd ?? 0);
+    const maxCrowd    = crowdScores.length ? Math.max(...crowdScores) : null;
+    const meanCrowd   = crowdScores.length ? crowdScores.reduce((a,b)=>a+b,0)/crowdScores.length : null;
+    if (maxCrowd != null) {
+      const crowdLabel = `max ${Math.round(maxCrowd * 100)}%  avg ${Math.round(meanCrowd * 100)}%`;
+      layersEl.appendChild(_scoredRow(
+        "Crowd Density",
+        crowdLabel,
+        maxCrowd,   // score: 0=empty→green, 1=dense→red
+        true        // higher crowd = higher risk
+      ));
+    } else {
+      layersEl.appendChild(_scoredRow("Crowd Density", "No data", null));
+    }
   }
 
   // ── C5: Runway Option — nearest aerodrome distance ────────────────────────

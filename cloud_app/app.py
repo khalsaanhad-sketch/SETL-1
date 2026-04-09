@@ -19,6 +19,7 @@ from cloud_app.services.terrain_engine import get_terrain, get_terrain_grid
 from cloud_app.services.weather_engine import get_weather
 from cloud_app.services.decision_engine import score_cells
 from cloud_app.services.crowd_engine import get_osm_crowd_grid
+import cloud_app.services.crowd_engine as _crowd_engine
 
 app = FastAPI()
 
@@ -403,19 +404,32 @@ async def ws_endpoint(ws: WebSocket, sid: str):
             try:
                 lat, lon = state["latitude"], state["longitude"]
 
-                # Fetch terrain (single-point), weather, DEM grid, and OSM crowd
-                # data in parallel.  All four are cached by position so the
-                # underlying API calls only fire when the aircraft moves >~5 km.
-                (
-                    terrain,
-                    weather,
-                    (slope_grid, roughness_grid),
-                    (crowd_grid, obstacle_grid),
-                ) = await asyncio.gather(
+                # ── Crowd density: non-blocking background fetch ──────────────
+                # Overpass can take 5-20 s on first load for dense cities.
+                # Strategy: serve a frame immediately using cached crowd data
+                # (or crowd=0 fallback) and fire the Overpass query as a
+                # background asyncio Task.  The *next* WS tick will find the
+                # cache populated and include full crowd density.
+                # This keeps the WS tick rate at terrain-speed (~3-5 s first
+                # load) rather than Overpass-speed (5-20 s).
+                _ck    = _crowd_engine._grid_cache_key(lat, lon)
+                _cache = _crowd_engine._CROWD_CACHE
+                if _cache["key"] == _ck and _cache["crowd"] is not None:
+                    # Fast path — already cached
+                    crowd_grid, obstacle_grid = _cache["crowd"], _cache["obstacle"]
+                elif _cache.get("pending") == _ck:
+                    # In-flight: background task running, use fallback this tick
+                    crowd_grid, obstacle_grid = None, None
+                else:
+                    # Cache miss — launch background task, use fallback this tick
+                    asyncio.create_task(get_osm_crowd_grid(lat, lon))
+                    crowd_grid, obstacle_grid = None, None
+
+                # Terrain, weather, and DEM run in parallel — none blocked by Overpass
+                terrain, weather, (slope_grid, roughness_grid) = await asyncio.gather(
                     get_terrain(lat, lon),
                     get_weather(lat, lon),
                     get_terrain_grid(lat, lon),
-                    get_osm_crowd_grid(lat, lon),
                 )
 
                 risk = compute_risk(state, weather)
@@ -442,6 +456,9 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "terrain":      terrain,
                     "weather":      weather,
                     "cells":        cells,
+                    # crowd_ready: False means OSM Overpass is still fetching in
+                    # the background; frontend shows "Fetching…" instead of 0%.
+                    "crowd_ready":  crowd_grid is not None,
                 }
 
                 await ws.send_json(result)
