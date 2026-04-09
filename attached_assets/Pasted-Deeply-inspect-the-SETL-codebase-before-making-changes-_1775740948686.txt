@@ -1,0 +1,182 @@
+Deeply inspect the SETL codebase before making changes. Focus on:
+
+- cloud_app/app.py
+- cloud_app/services/terrain_engine.py
+- cloud_app/services/decision_engine.py
+- cloud_app/services/probability_engine.py
+- cloud_app/static/main.js
+
+Goal:
+Upgrade the system to use real-world data sources for terrain, weather, and runways WITHOUT breaking:
+- existing APIs
+- WebSocket structure
+- 9x9 grid logic
+- AHP + TOPSIS + logistic regression pipeline
+
+Make minimal, modular additions only.
+
+----------------------------------------
+1. TERRAIN UPGRADE (SRTM / Copernicus DEM)
+----------------------------------------
+
+In terrain_engine.py:
+
+- Replace or extend current terrain fetch logic with SRTM-based elevation.
+- Use a free tile-based API or cached raster approach.
+- Priority: deterministic elevation and slope (no randomness)
+
+Implementation:
+
+- Add function:
+  get_elevation(lat, lon) → returns elevation in meters
+
+- Compute slope using neighboring points (finite difference, no randomness)
+
+- If API fails:
+  return None and set terrain_confidence = "low"
+
+Do NOT:
+- introduce synthetic terrain
+- use random fallback
+
+----------------------------------------
+2. WEATHER UPGRADE (METAR)
+----------------------------------------
+
+Add new file:
+cloud_app/services/weather_engine.py
+
+Implement:
+
+- fetch_metar(lat, lon)
+    → find nearest station
+    → fetch METAR string
+
+- parse:
+    wind speed
+    wind direction
+    visibility
+    ceiling (if available)
+
+Use free sources such as NOAA / aviationweather.gov
+
+Return structured output:
+
+{
+  "wind_speed": value,
+  "wind_dir": value,
+  "visibility": value,
+  "ceiling": value,
+  "confidence": "real"
+}
+
+Fallback:
+- If METAR unavailable → use existing weather API
+- mark confidence = "approx"
+
+Do NOT remove existing weather system, only extend it.
+
+----------------------------------------
+3. RUNWAY DATABASE INTEGRATION
+----------------------------------------
+
+Add new file:
+cloud_app/services/runway_engine.py
+
+Use:
+OurAirports dataset (CSV or lightweight API)
+
+Implement:
+
+- get_nearby_runways(lat, lon, radius_km)
+
+Return:
+[
+  {
+    "ident": "XXYY",
+    "lat": value,
+    "lon": value,
+    "length_m": value,
+    "surface": value
+  }
+]
+
+In decision_engine.py:
+
+- Add runway proximity scoring:
+    closer runway → lower risk
+    longer runway → better score
+
+Do NOT override terrain scoring — only augment it.
+
+----------------------------------------
+4. WATER LOGIC FIX (CRITICAL)
+----------------------------------------
+
+In app.py:
+
+- Keep GEBCO depth if available
+
+- If water detected but no GEBCO depth:
+    set:
+        depth = None
+        water_status = "unknown"
+
+- In decision_engine:
+    unknown water → HIGH RISK
+
+Remove ALL:
+- random.uniform
+- synthetic water depth
+
+----------------------------------------
+5. CONFIDENCE LAYER (ADD ONLY, DO NOT BREAK OUTPUT)
+----------------------------------------
+
+Each cell should internally track:
+
+- terrain_confidence
+- weather_confidence
+- obstacle_confidence
+- water_confidence
+
+Combine into:
+
+confidence_score = average of available confidences
+
+Do NOT change frontend structure unless necessary.
+If needed, append field without breaking existing keys.
+
+----------------------------------------
+6. DO NOT TOUCH
+----------------------------------------
+
+- AHP weights
+- TOPSIS implementation
+- logistic regression coefficients
+- frontend rendering logic
+- websocket structure
+
+----------------------------------------
+7. FINAL VALIDATION
+----------------------------------------
+
+Ensure:
+
+- identical inputs → identical outputs
+- no randomness anywhere
+- real APIs used where available
+- fallback only reduces confidence, not injects fake data
+
+----------------------------------------
+8. BEFORE APPLYING
+----------------------------------------
+
+Show full diff of:
+- terrain_engine.py
+- weather_engine.py (new)
+- runway_engine.py (new)
+- decision_engine.py (only added logic)
+- app.py (minimal edits)
+
+Do not proceed without diff review.
