@@ -102,7 +102,7 @@ async function fetchNearestAirport(lat, lon) {
   const key = _overpassCacheKey(lat, lon);
   if (key === _airportFetchKey) return;
   _airportFetchKey = key;
-  const q = `[out:json][timeout:8];node[aeroway=aerodrome](around:200000,${lat},${lon});out body;`;
+  const q = `[out:json][timeout:10];nwr[aeroway=aerodrome](around:200000,${lat},${lon});out center;`;
   try {
     const resp = await fetch(_OVERPASS, {
       method: "POST", body: q, headers: { "Content-Type": "text/plain" },
@@ -112,9 +112,11 @@ async function fetchNearestAirport(lat, lon) {
     const els  = (await resp.json()).elements || [];
     let best   = null, bestDist = Infinity;
     for (const el of els) {
-      if (el.lat == null || el.lon == null) continue;
-      const d = haversine(lat, lon, el.lat, el.lon);
-      if (d < bestDist) { bestDist = d; best = el; }
+      const eLat = el.lat ?? el.center?.lat;
+      const eLon = el.lon ?? el.center?.lon;
+      if (eLat == null || eLon == null) continue;
+      const d = haversine(lat, lon, eLat, eLon);
+      if (d < bestDist) { bestDist = d; best = { ...el, lat: eLat, lon: eLon }; }
     }
     _nearestAirport = best
       ? { name: best.tags?.name || "Unknown",
