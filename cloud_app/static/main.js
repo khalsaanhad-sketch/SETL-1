@@ -542,50 +542,56 @@ function draw(data) {
   const isOcean     = terrain.is_water;
   const recommended = (data.options || []).find((o) => o.recommended);
 
-  let decisionTitle, decisionReason;
-  if (isOcean) {
-    decisionTitle  = "DITCHING ADVISORY — Water terrain detected";
-    decisionReason = `Surface: ${terrain.surface_type || "ocean"} | Elev: ${terrain.elevation_m ?? "--"} m`;
-  } else if (recommended) {
-    decisionTitle  = recommended.description;
-    decisionReason = `Success probability: ${Math.round((recommended.success_probability || 0) * 100)}%`;
+  if (!selectedAcId) {
+    // No aircraft selected — don't show fictitious flight-specific guidance
+    document.getElementById("decisionBox").innerHTML =
+      `<span style="color:#667;font-style:italic">No aircraft selected.</span><br>` +
+      `<span style="color:#4a5a7a;font-size:0.85em">Select a flight from the traffic list or click a marker to begin emergency analysis.</span>`;
   } else {
-    decisionTitle  = data.alerts?.[0]?.message || "Monitoring situation...";
-    decisionReason = `Risk level: ${Math.round(failRisk * 100)}%`;
-  }
+    let decisionTitle, decisionReason;
+    if (isOcean) {
+      decisionTitle  = "DITCHING ADVISORY — Water terrain detected";
+      decisionReason = `Surface: ${terrain.surface_type || "ocean"} | Elev: ${terrain.elevation_m ?? "--"} m`;
+    } else if (recommended) {
+      decisionTitle  = recommended.description;
+      decisionReason = `Success probability: ${Math.round((recommended.success_probability || 0) * 100)}%`;
+    } else {
+      decisionTitle  = data.alerts?.[0]?.message || "Monitoring situation...";
+      decisionReason = `Risk level: ${Math.round(failRisk * 100)}%`;
+    }
 
-  // A — Safest LZ coordinates (from lowest-risk land cell, updated every WS tick)
-  let lzHtml = "";
-  if (!isOcean && sortedLand.length) {
-    const sc     = sortedLand[0];
-    const rawLat = (sc.corners[0][0] + sc.corners[2][0]) / 2;
-    const rawLon = (sc.corners[0][1] + sc.corners[2][1]) / 2;
-    // Use cardinal directions so southern/western hemisphere coords display correctly
-    const latStr = `${Math.abs(rawLat).toFixed(4)}°${rawLat >= 0 ? "N" : "S"}`;
-    const lonStr = `${Math.abs(rawLon).toFixed(4)}°${rawLon >= 0 ? "E" : "W"}`;
-    lzHtml = `<div class="lz-item" style="margin-top:6px">` +
-      `<strong>Safest LZ</strong>` +
-      `<span>${latStr}, ${lonStr} &mdash; Risk ${sc.risk}</span>` +
-      `</div>`;
-  } else if (isOcean) {
-    lzHtml = `<div class="lz-item" style="margin-top:6px">` +
-      `<strong>Safest LZ</strong><span>Water &mdash; no land LZ</span></div>`;
-  }
+    // A — Safest LZ coordinates (from lowest-risk land cell, updated every WS tick)
+    let lzHtml = "";
+    if (!isOcean && sortedLand.length) {
+      const sc     = sortedLand[0];
+      const rawLat = (sc.corners[0][0] + sc.corners[2][0]) / 2;
+      const rawLon = (sc.corners[0][1] + sc.corners[2][1]) / 2;
+      const latStr = `${Math.abs(rawLat).toFixed(4)}°${rawLat >= 0 ? "N" : "S"}`;
+      const lonStr = `${Math.abs(rawLon).toFixed(4)}°${rawLon >= 0 ? "E" : "W"}`;
+      lzHtml = `<div class="lz-item" style="margin-top:6px">` +
+        `<strong>Safest LZ</strong>` +
+        `<span>${latStr}, ${lonStr} &mdash; Risk ${sc.risk}</span>` +
+        `</div>`;
+    } else if (isOcean) {
+      lzHtml = `<div class="lz-item" style="margin-top:6px">` +
+        `<strong>Safest LZ</strong><span>Water &mdash; no land LZ</span></div>`;
+    }
 
-  // B — Nearest airport from Overpass (populated async after aircraft selection)
-  let aptHtml = "";
-  if (_nearestAirport) {
-    const tag = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
-    aptHtml = `<div class="lz-item">` +
-      `<strong>Nearest airport</strong>` +
-      `<span>${esc(_nearestAirport.name)}${esc(tag)} &mdash; ${_nearestAirport.dist_km} km</span>` +
-      `</div>`;
-  }
+    // B — Nearest airport from Overpass (populated async after aircraft selection)
+    let aptHtml = "";
+    if (_nearestAirport) {
+      const tag = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
+      aptHtml = `<div class="lz-item">` +
+        `<strong>Nearest airport</strong>` +
+        `<span>${esc(_nearestAirport.name)}${esc(tag)} &mdash; ${_nearestAirport.dist_km} km</span>` +
+        `</div>`;
+    }
 
-  document.getElementById("decisionBox").innerHTML =
-    `<strong>${esc(decisionTitle)}</strong><br>` +
-    `<span style="color:#99a8c6;font-size:0.85em">${esc(decisionReason)}</span>` +
-    lzHtml + aptHtml;
+    document.getElementById("decisionBox").innerHTML =
+      `<strong>${esc(decisionTitle)}</strong><br>` +
+      `<span style="color:#99a8c6;font-size:0.85em">${esc(decisionReason)}</span>` +
+      lzHtml + aptHtml;
+  }
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
@@ -738,11 +744,17 @@ function draw(data) {
   // ── Ops view ───────────────────────────────────────────────────────────────
   const g = data.guidance || {};
   const p = data.probabilistic || {};
-  document.getElementById("opsInfo").innerHTML =
-    `${esc(g.action || "--")}<br>` +
-    `AGL: ${Math.round(g.agl_ft || 0)} ft &nbsp;|&nbsp; Time to ground: ${g.time_to_ground_min ?? "--"} min<br>` +
-    `Safe heading: ${g.safe_heading_deg ?? "--"}° &nbsp;|&nbsp; Rec. speed: ${g.recommended_speed_kts ?? "--"} kt<br>` +
-    `Success: ${Math.round((p.success || 0) * 100)}% &nbsp;|&nbsp; Confidence: ${Math.round((p.confidence || 0) * 100)}%`;
+  if (!selectedAcId) {
+    document.getElementById("opsInfo").innerHTML =
+      `<span style="color:#667;font-style:italic">Awaiting aircraft selection.</span><br>` +
+      `<span style="color:#4a5a7a;font-size:0.85em">Flight guidance, AGL, time-to-ground and probability metrics will appear here once a flight is selected.</span>`;
+  } else {
+    document.getElementById("opsInfo").innerHTML =
+      `${esc(g.action || "--")}<br>` +
+      `AGL: ${Math.round(g.agl_ft || 0)} ft &nbsp;|&nbsp; Time to ground: ${g.time_to_ground_min ?? "--"} min<br>` +
+      `Safe heading: ${g.safe_heading_deg ?? "--"}° &nbsp;|&nbsp; Rec. speed: ${g.recommended_speed_kts ?? "--"} kt<br>` +
+      `Success: ${Math.round((p.success || 0) * 100)}% &nbsp;|&nbsp; Confidence: ${Math.round((p.confidence || 0) * 100)}%`;
+  }
 }
 
 // ── WebSocket connection ───────────────────────────────────────────────────────
@@ -904,6 +916,14 @@ async function init() {
   field.style.color  = "#99a8c6";
   field.style.cursor = "default";
 
+  // Set placeholder state for panels that require an active aircraft selection
+  document.getElementById("decisionBox").innerHTML =
+    `<span style="color:#667;font-style:italic">No aircraft selected.</span><br>` +
+    `<span style="color:#4a5a7a;font-size:0.85em">Select a flight from the traffic list or click a marker to begin emergency analysis.</span>`;
+  document.getElementById("opsInfo").innerHTML =
+    `<span style="color:#667;font-style:italic">Awaiting aircraft selection.</span><br>` +
+    `<span style="color:#4a5a7a;font-size:0.85em">Flight guidance, AGL, time-to-ground and probability metrics will appear here once a flight is selected.</span>`;
+
   connectWS();
   fetchAircraft();
   setInterval(fetchAircraft, 6000);
@@ -965,6 +985,13 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({ latitude: currentLat, longitude: currentLon }),
   });
+  // Immediately show no-selection placeholders — don't wait for next WS tick
+  document.getElementById("decisionBox").innerHTML =
+    `<span style="color:#667;font-style:italic">No aircraft selected.</span><br>` +
+    `<span style="color:#4a5a7a;font-size:0.85em">Select a flight from the traffic list or click a marker to begin emergency analysis.</span>`;
+  document.getElementById("opsInfo").innerHTML =
+    `<span style="color:#667;font-style:italic">Awaiting aircraft selection.</span><br>` +
+    `<span style="color:#4a5a7a;font-size:0.85em">Flight guidance, AGL, time-to-ground and probability metrics will appear here once a flight is selected.</span>`;
   drawTraffic();
   drawTrafficList();
   document.getElementById("appNotice").textContent = "Returned to area mode.";
