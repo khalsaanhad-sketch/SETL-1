@@ -106,13 +106,14 @@ def score_cells(cells: list) -> list:
         crowd  = float(c.get("crowd",     0.0))
         obst   = float(c.get("obstacle",  0.0))
         wind   = float(c.get("wind",      0.0))
+        surf   = float(c.get("surface",   0.0))
 
         if c.get("is_water"):
             water_idx.append(idx)
             water_rows.append([dist, wind, 1.0, crowd, slope])  # surface=1 constant
         else:
             land_idx.append(idx)
-            land_rows.append([slope, rough, dist, crowd, obst, 0.0])  # surface=0
+            land_rows.append([slope, rough, dist, crowd, obst, surf])
 
     if land_rows:
         scores = _topsis(np.array(land_rows, dtype=float), _LAND_W)

@@ -18,6 +18,7 @@ from cloud_app.services.options_engine import compute_options
 from cloud_app.services.terrain_engine import get_terrain, get_terrain_grid
 from cloud_app.services.weather_engine import get_weather
 from cloud_app.services.decision_engine import score_cells
+from cloud_app.services.crowd_engine import get_osm_crowd_grid
 
 app = FastAPI()
 
@@ -56,7 +57,8 @@ def ensure_session(sid):
 
 
 def generate_cells(state, terrain, prob, weather=None,
-                   slope_grid=None, roughness_grid=None):
+                   slope_grid=None, roughness_grid=None,
+                   crowd_grid=None, obstacle_grid=None):
     """
     Build a 9×9 risk grid centred on the aircraft.
 
@@ -100,6 +102,7 @@ def generate_cells(state, terrain, prob, weather=None,
 
             if is_water:
                 local_depth = max(0.0, abs(elev) + random.uniform(-150, 150))
+                crowd_val = round(float(crowd_grid[gi, gj]), 3) if crowd_grid is not None else 0.0
                 cells.append({
                     "corners":   corners,
                     "is_water":  True,
@@ -109,8 +112,9 @@ def generate_cells(state, terrain, prob, weather=None,
                     "roughness": 0.0,
                     "distance":  dist_km(i, j),
                     "wind":      wind_ms,
-                    "crowd":     0.0,
+                    "crowd":     crowd_val,
                     "obstacle":  0.0,
+                    "surface":   1.0,   # water surface always max difficulty
                     # placeholders — overwritten by score_cells()
                     "risk":      0.9,
                     "color":     "#1d4ed8",
@@ -125,6 +129,13 @@ def generate_cells(state, terrain, prob, weather=None,
 
                 roughness = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
 
+                # surface score: normalised slope (0° flat → 0.0; ≥30° steep → 1.0)
+                # Reuses the DEM slope already fetched — no new API call needed.
+                surface_score = round(min(1.0, slope / 30.0), 3)
+
+                crowd_val    = round(float(crowd_grid[gi, gj]),    3) if crowd_grid    is not None else 0.0
+                obstacle_val = round(float(obstacle_grid[gi, gj]), 3) if obstacle_grid is not None else 0.0
+
                 cells.append({
                     "corners":   corners,
                     "is_water":  False,
@@ -133,8 +144,9 @@ def generate_cells(state, terrain, prob, weather=None,
                     "roughness": round(roughness, 2),
                     "distance":  dist_km(i, j),
                     "wind":      wind_ms,
-                    "crowd":     0.0,
-                    "obstacle":  0.0,
+                    "crowd":     crowd_val,
+                    "obstacle":  obstacle_val,
+                    "surface":   surface_score,
                     # placeholders — overwritten by score_cells()
                     "risk":      0.5,
                     "color":     "#d8d62b",
@@ -145,7 +157,7 @@ def generate_cells(state, terrain, prob, weather=None,
 
     # ── Strip internal-only TOPSIS input fields before sending to frontend ────
     for c in cells:
-        for key in ("roughness", "distance", "wind", "crowd", "obstacle"):
+        for key in ("roughness", "distance", "wind", "crowd", "obstacle", "surface"):
             c.pop(key, None)
 
     return cells
@@ -389,13 +401,19 @@ async def ws_endpoint(ws: WebSocket, sid: str):
             try:
                 lat, lon = state["latitude"], state["longitude"]
 
-                # Fetch terrain (single-point), weather, and DEM grid in parallel.
-                # get_terrain_grid is cached by position so the batch API call
-                # only fires when the aircraft has moved >~5 km.
-                (terrain, weather, (slope_grid, roughness_grid)) = await asyncio.gather(
+                # Fetch terrain (single-point), weather, DEM grid, and OSM crowd
+                # data in parallel.  All four are cached by position so the
+                # underlying API calls only fire when the aircraft moves >~5 km.
+                (
+                    terrain,
+                    weather,
+                    (slope_grid, roughness_grid),
+                    (crowd_grid, obstacle_grid),
+                ) = await asyncio.gather(
                     get_terrain(lat, lon),
                     get_weather(lat, lon),
                     get_terrain_grid(lat, lon),
+                    get_osm_crowd_grid(lat, lon),
                 )
 
                 risk = compute_risk(state, weather)
@@ -409,16 +427,19 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     weather=weather,
                     slope_grid=slope_grid,
                     roughness_grid=roughness_grid,
+                    crowd_grid=crowd_grid,
+                    obstacle_grid=obstacle_grid,
                 )
 
                 result = {
-                    "alerts": alerts,
-                    "guidance": guidance,
+                    "alerts":       alerts,
+                    "guidance":     guidance,
                     "probabilistic": prob,
-                    "options": options,
-                    "terrain": terrain,
-                    "weather": weather,
-                    "cells": cells,
+                    "risk":         risk,   # exposes flight_state + weather_risk to frontend
+                    "options":      options,
+                    "terrain":      terrain,
+                    "weather":      weather,
+                    "cells":        cells,
                 }
 
                 await ws.send_json(result)

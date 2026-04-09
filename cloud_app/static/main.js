@@ -58,6 +58,12 @@ let _selPrevLon = null;
 // When true, fetchAircraft() will auto-select the nearest aircraft after the feed loads.
 let _autoSelectFirst = false;
 
+// ── Overpass-fetched context — nearest airport and road ───────────────────────
+let _nearestAirport  = null;   // { name, icao, dist_km }
+let _nearestRoad     = null;   // { type, dist_km }
+let _airportFetchKey = "";     // quantised cache key to avoid redundant calls
+let _roadFetchKey    = "";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(v) {
   return String(v ?? "").replace(
@@ -83,6 +89,61 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) ** 2;
   return Math.round(6371 * 2 * Math.asin(Math.sqrt(a)) * 10) / 10;
+}
+
+// ── Overpass helpers — nearest airport & road (cached, fired in background) ───
+const _OVERPASS = "https://overpass-api.de/api/interpreter";
+
+function _overpassCacheKey(lat, lon, res = 0.05) {
+  return `${(Math.round(lat / res) * res).toFixed(2)},${(Math.round(lon / res) * res).toFixed(2)}`;
+}
+
+async function fetchNearestAirport(lat, lon) {
+  const key = _overpassCacheKey(lat, lon);
+  if (key === _airportFetchKey) return;
+  _airportFetchKey = key;
+  const q = `[out:json][timeout:8];node[aeroway=aerodrome](around:200000,${lat},${lon});out body;`;
+  try {
+    const resp = await fetch(_OVERPASS, {
+      method: "POST", body: q, headers: { "Content-Type": "text/plain" },
+    });
+    const els  = (await resp.json()).elements || [];
+    let best   = null, bestDist = Infinity;
+    for (const el of els) {
+      if (el.lat == null || el.lon == null) continue;
+      const d = haversine(lat, lon, el.lat, el.lon);
+      if (d < bestDist) { bestDist = d; best = el; }
+    }
+    _nearestAirport = best
+      ? { name: best.tags?.name || "Unknown",
+          icao: best.tags?.icao || best.tags?.iata || "",
+          dist_km: Math.round(bestDist * 10) / 10 }
+      : null;
+  } catch (_) { _nearestAirport = null; }
+}
+
+async function fetchNearestRoad(lat, lon) {
+  const key = _overpassCacheKey(lat, lon);
+  if (key === _roadFetchKey) return;
+  _roadFetchKey = key;
+  const q = `[out:json][timeout:8];way[highway~"^(motorway|trunk|primary|secondary)$"](around:30000,${lat},${lon});out center;`;
+  try {
+    const resp = await fetch(_OVERPASS, {
+      method: "POST", body: q, headers: { "Content-Type": "text/plain" },
+    });
+    const els  = (await resp.json()).elements || [];
+    let best   = null, bestDist = Infinity;
+    for (const el of els) {
+      const cLat = el.center?.lat ?? el.lat;
+      const cLon = el.center?.lon ?? el.lon;
+      if (cLat == null || cLon == null) continue;
+      const d = haversine(lat, lon, cLat, cLon);
+      if (d < bestDist) { bestDist = d; best = el; }
+    }
+    _nearestRoad = best
+      ? { type: best.tags?.highway || "road", dist_km: Math.round(bestDist * 10) / 10 }
+      : null;
+  } catch (_) { _nearestRoad = null; }
 }
 
 // ── Risk grid (computed client-side from backend risk score) ─────────────────
@@ -240,6 +301,10 @@ async function selectAircraft(ac) {
   map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
+
+  // Fire background context fetches — result appears in Layers/Decision on next draw()
+  fetchNearestAirport(ac.latitude, ac.longitude);
+  fetchNearestRoad(ac.latitude, ac.longitude);
   // Do NOT redraw with latestData here — it holds home-position cells that are
   // now off-screen. The WebSocket delivers aircraft-position cells within 1.5 s.
 }
@@ -483,8 +548,35 @@ function draw(data) {
     decisionReason = `Risk level: ${Math.round(failRisk * 100)}%`;
   }
 
+  // A — Safest LZ coordinates (from lowest-risk land cell, updated every WS tick)
+  let lzHtml = "";
+  if (!isOcean && sortedLand.length) {
+    const sc   = sortedLand[0];
+    const cLat = ((sc.corners[0][0] + sc.corners[2][0]) / 2).toFixed(4);
+    const cLon = ((sc.corners[0][1] + sc.corners[2][1]) / 2).toFixed(4);
+    lzHtml = `<div class="lz-item" style="margin-top:6px">` +
+      `<strong>Safest LZ</strong>` +
+      `<span>${cLat}°N, ${cLon}°E &mdash; Risk ${sc.risk}</span>` +
+      `</div>`;
+  } else if (isOcean) {
+    lzHtml = `<div class="lz-item" style="margin-top:6px">` +
+      `<strong>Safest LZ</strong><span>Water &mdash; no land LZ</span></div>`;
+  }
+
+  // B — Nearest airport from Overpass (populated async after aircraft selection)
+  let aptHtml = "";
+  if (_nearestAirport) {
+    const tag = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
+    aptHtml = `<div class="lz-item">` +
+      `<strong>Nearest airport</strong>` +
+      `<span>${esc(_nearestAirport.name)}${esc(tag)} &mdash; ${_nearestAirport.dist_km} km</span>` +
+      `</div>`;
+  }
+
   document.getElementById("decisionBox").innerHTML =
-    `<strong>${esc(decisionTitle)}</strong><br>${esc(decisionReason)}`;
+    `<strong>${esc(decisionTitle)}</strong><br>` +
+    `<span style="color:#99a8c6;font-size:0.85em">${esc(decisionReason)}</span>` +
+    lzHtml + aptHtml;
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
@@ -500,6 +592,96 @@ function draw(data) {
   const layersEl = document.getElementById("layers");
   layersEl.innerHTML = "";
 
+  // Helper: map a [0,1] score to a colour (invert=true → lower score = safer)
+  function _scoreColor(score, invert = false) {
+    const s = invert ? score : 1 - score;   // s=0 → safe (green), s=1 → danger (red)
+    if (s < 0.25) return "#2cb64f";
+    if (s < 0.50) return "#d8d62b";
+    if (s < 0.75) return "#ff9c00";
+    return "#ba2627";
+  }
+
+  // Helper: build a scored lz-item row with a coloured left accent bar
+  function _scoredRow(label, display, score, invert = false) {
+    const col = score != null ? _scoreColor(score, invert) : "#4a5a7a";
+    const div = document.createElement("div");
+    div.className = "lz-item";
+    div.style.borderLeft  = `3px solid ${col}`;
+    div.style.paddingLeft = "6px";
+    div.innerHTML = `<strong>${esc(label)}</strong><span>${esc(String(display))}</span>`;
+    return div;
+  }
+
+  // ── C1: Ground Safety — best available LZ safety in the current grid ─────
+  const groundSafety = sortedLand.length ? Math.round((1 - sortedLand[0].risk) * 100) / 100 : null;
+  layersEl.appendChild(_scoredRow(
+    "Ground Safety",
+    groundSafety != null ? groundSafety : "--",
+    groundSafety,
+    false   // higher ground safety = greener
+  ));
+
+  // ── C2: Flight State — overall aircraft risk from flight parameters ────────
+  const flightState = data.risk?.overall ?? null;
+  layersEl.appendChild(_scoredRow(
+    "Flight State",
+    flightState != null ? Math.round(flightState * 100) / 100 : "--",
+    flightState != null ? flightState : null,
+    true    // higher risk = redder
+  ));
+
+  // ── C3: Weather Risk — weather contribution to overall risk ───────────────
+  const weatherRiskScore = data.risk?.weather_risk ?? null;
+  layersEl.appendChild(_scoredRow(
+    "Weather Risk",
+    weatherRiskScore != null ? Math.round(weatherRiskScore * 100) / 100 : "--",
+    weatherRiskScore != null ? weatherRiskScore : null,
+    true
+  ));
+
+  // ── C4: Air Traffic — aircraft within 20 km of current position ───────────
+  const within20 = aircraftFeed.filter((a) => a.distance_km <= 20).length;
+  const atScore  = Math.min(1.0, within20 / 10);   // normalise: 10 aircraft = max
+  layersEl.appendChild(_scoredRow(
+    "Air Traffic",
+    `${within20} within 20 km`,
+    atScore,
+    true    // more traffic = higher risk
+  ));
+
+  // ── C5: Runway Option — nearest aerodrome distance ────────────────────────
+  if (_nearestAirport) {
+    const rwyScore = Math.max(0, Math.min(1, 1 - _nearestAirport.dist_km / 150));
+    const tag      = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
+    layersEl.appendChild(_scoredRow(
+      "Runway Option",
+      `${_nearestAirport.dist_km} km${tag}`,
+      rwyScore,
+      false   // closer airport = greener
+    ));
+  } else {
+    layersEl.appendChild(_scoredRow("Runway Option", "Searching…", null));
+  }
+
+  // ── C6: Road Candidate — nearest major road ───────────────────────────────
+  if (_nearestRoad) {
+    const rdScore = Math.max(0, Math.min(1, 1 - _nearestRoad.dist_km / 30));
+    layersEl.appendChild(_scoredRow(
+      "Road Candidate",
+      `${_nearestRoad.type} · ${_nearestRoad.dist_km} km`,
+      rdScore,
+      false   // closer road = greener
+    ));
+  } else {
+    layersEl.appendChild(_scoredRow("Road Candidate", "Searching…", null));
+  }
+
+  // ── Divider ──────────────────────────────────────────────────────────────
+  const divider = document.createElement("div");
+  divider.style.cssText = "border-top:1px solid #1e2d4a;margin:4px 0;";
+  layersEl.appendChild(divider);
+
+  // ── Terrain & weather detail rows (existing) ──────────────────────────────
   const elevLabel = terrain.is_water
     ? (terrain.elevation_m != null ? `${Math.abs(Math.round(terrain.elevation_m))} m depth` : "--")
     : (terrain.elevation_m != null ? `${Math.round(terrain.elevation_m)} m` : "--");
@@ -633,6 +815,11 @@ async function searchLocation(query) {
     _selPrevLon      = null;
     _riskLat         = lat;
     _riskLon         = lon;
+    // Reset Overpass context so new location gets fresh lookups
+    _nearestAirport  = null;
+    _nearestRoad     = null;
+    _airportFetchKey = "";
+    _roadFetchKey    = "";
 
     // Clear the aircraft list immediately so old flights vanish at once
     drawTrafficList();
@@ -656,6 +843,10 @@ async function searchLocation(query) {
     // Fetch aircraft — auto-select nearest when results arrive
     _autoSelectFirst = true;
     fetchAircraft();
+
+    // Fire context fetches for the new location
+    fetchNearestAirport(lat, lon);
+    fetchNearestRoad(lat, lon);
     notice.textContent = `Moved to: ${label}`;
   } catch (_) {
     document.getElementById("appNotice").textContent = "Search failed — check connection.";
