@@ -3,29 +3,34 @@ SETL Crowd Engine — OSM Overpass multi-signal crowd + obstacle density grid.
 
 Population density proxy uses TWO complementary OSM signals:
 
-  1. amenity=*  (restaurants, schools, hospitals, markets, offices…)
-       → Captures commercial / public activity zones.
-       → Miss: residential areas with no shops.
+  1. node[amenity=*]
+       Captures commercial / civic activity zones (restaurants, schools,
+       hospitals, offices, markets…).  Fast — only node elements.
 
-  2. way[building=residential|apartments|house|…]  (residential buildings)
-       → Captures where people actually LIVE — housing estates, flats, villas.
-       → Fills exactly the gap that WorldPop would fill over OSM-amenity alone.
+  2. way[landuse=residential|housing]
+       Captures RESIDENTIAL zones — housing estates, suburbs, villas, HDB
+       blocks.  Returns tens to a few hundred polygon centroids per grid area,
+       NOT tens-of-thousands of individual building footprints.
 
-crowd_score per cell = max(amenity_score, building_score)
-This ensures a dense housing estate with zero amenities still scores correctly.
+       Why landuse instead of way[building=residential]:
+       In well-mapped cities (Tokyo, Singapore, Seoul) individual building ways
+       number in the hundreds of thousands per 9×9 grid, causing Overpass
+       queries to return 100k+ elements and stall the WS tick.
+       landuse=residential polygons are orders-of-magnitude fewer (typically
+       10–500 per grid) while still correctly identifying "this area is where
+       people live."
 
-WorldPop REST API (api.worldpop.org/v1/services/stats) was tested but all
-dataset parameter values are currently rejected with 422 — the API endpoint
-appears to have changed or is broken upstream. The two-signal OSM approach
-achieves the same residential-population-proxy goal without external
-authentication or large raster downloads.
+crowd_score per cell = max(amenity_score, residential_zone_score)
+  → Commercial zones score high from amenities
+  → Residential-only zones score high from landuse coverage
+  → Rural/agricultural fields score ≈ 0 from both signals  ✓
 
-obstacle=*  (aviation-relevant obstacles: power towers, masts, chimneys)
-       → 5 % TOPSIS weight; surfaces are not affected by crowd signal.
+obstacle=*  (aviation-relevant structures: power towers, masts, chimneys)
+  → 5 % TOPSIS weight in decision_engine.py
 
 Returns (crowd_grid, obstacle_grid) as 9×9 numpy arrays in [0, 1].
 Cached at ~5 km position resolution.  Returns (None, None) on any API failure
-so callers fall back gracefully to 0.0.
+so generate_cells() falls back gracefully to crowd = 0.0 / obstacle = 0.0.
 """
 
 import httpx
@@ -35,16 +40,13 @@ _CROWD_CACHE: dict = {"key": None, "crowd": None, "obstacle": None}
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # Saturation thresholds — count at which a cell reaches score = 1.0
-_AMENITY_MAX  = 40   # 40 amenity nodes/cell  → amenity_score = 1.0
-_BUILDING_MAX = 80   # 80 residential ways/cell → building_score = 1.0
-_OBSTACLE_MAX =  5   # 5  tower/mast nodes/cell → obstacle_score = 1.0
+_AMENITY_MAX    = 40  # 40 amenity nodes / cell  → amenity_score  = 1.0
+_LANDUSE_MAX    =  4  # 4 residential landuse centroids / cell → zone_score = 1.0
+_OBSTACLE_MAX   =  5  # 5 tower / mast nodes / cell → obstacle_score = 1.0
 
-# Residential building tags that imply human occupancy
-_RESIDENTIAL_BUILDING_TYPES = {
-    "residential", "apartments", "house", "dormitory", "bungalow",
-    "semidetached_house", "terrace", "tower_block", "flat", "detached",
-    "yes",   # generic 'yes' catches untagged residential in OSM
-}
+# Element processing guard — bail out early if Overpass returns unexpectedly
+# large responses (e.g. after query changes or server-side bugs)
+_MAX_ELEMENTS = 5_000
 
 
 def _grid_cache_key(lat: float, lon: float, cell_size: float = 0.01) -> tuple:
@@ -60,11 +62,9 @@ async def get_osm_crowd_grid(
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Return (crowd_grid, obstacle_grid) as (2*steps+1) × (2*steps+1) arrays.
-    Aligned with the 9×9 cell layout used by generate_cells() in app.py.
-    Returns (None, None) on Overpass failure — callers fall back to crowd=0.0.
-
-    crowd_grid  = max(amenity_score, building_score)  per cell
-    obstacle_grid = tower/mast/chimney density         per cell
+    crowd_grid  = max(amenity_score, residential_landuse_score) per cell
+    obstacle_grid = tower/mast/chimney density per cell
+    Returns (None, None) on Overpass failure — callers fall back to 0.0.
     """
     key = _grid_cache_key(lat, lon, cell_size)
     if _CROWD_CACHE["key"] == key and _CROWD_CACHE["crowd"] is not None:
@@ -79,41 +79,52 @@ async def get_osm_crowd_grid(
     lon_max = round(lon + steps * cell_size + half, 6)
     bbox    = f"{lat_min},{lon_min},{lat_max},{lon_max}"
 
-    # Single query: amenity nodes + residential building ways + obstacle nodes.
-    # 'out center;' gives centroid lat/lon for ways; nodes already have lat/lon.
+    # Efficient query:
+    #   • amenity nodes         — commercial / civic activity
+    #   • landuse=residential ways — where people LIVE (centroid only, << building ways)
+    #   • obstacle nodes        — aviation hazards
+    # NO [maxsize] override: Overpass default (512 MB) handles even the densest cities.
+    # Using [maxsize:20MB] caused silent OOM failures in Tokyo/Singapore because
+    # their amenity-node counts (10k+ per grid) push past 20 MB before Overpass
+    # can stream a response.
     query = (
-        f'[out:json][timeout:15];'
+        f'[out:json][timeout:14];'
         f'('
         f'node[amenity]({bbox});'
         f'node[man_made~"^(tower|mast|chimney|antenna)$"]({bbox});'
         f'node[power="tower"]({bbox});'
-        f'way[building~"^(residential|apartments|house|dormitory|bungalow|'
-        f'semidetached_house|terrace|tower_block|flat|detached|yes)$"]({bbox});'
+        f'way[landuse~"^(residential|housing)$"]({bbox});'
         f');'
         f'out center;'
     )
 
     try:
         async with httpx.AsyncClient(timeout=16.0) as client:
-            resp     = await client.post(
+            resp = await client.post(
                 _OVERPASS_URL,
                 content=query,
                 headers={"Content-Type": "text/plain"},
             )
-            elements = resp.json().get("elements", [])
+            data     = resp.json()
+            remark   = data.get("remark", "")
+            elements = data.get("elements", [])
+            # Overpass signals memory/runtime errors via the "remark" field.
+            # Treat any such condition as a failure so callers use the 0.0 fallback.
+            if "error" in remark.lower() or "out of memory" in remark.lower():
+                raise RuntimeError(f"Overpass remark: {remark[:120]}")
     except Exception:
         _CROWD_CACHE.update({"key": key, "crowd": None, "obstacle": None})
         return None, None
 
     amenity_counts  = np.zeros((dim, dim), dtype=float)
-    building_counts = np.zeros((dim, dim), dtype=float)
+    landuse_counts  = np.zeros((dim, dim), dtype=float)
     obstacle_counts = np.zeros((dim, dim), dtype=float)
 
-    for el in elements:
+    for el in elements[:_MAX_ELEMENTS]:
         el_type = el.get("type")
         tags    = el.get("tags", {})
 
-        # Resolve centroid: nodes have lat/lon directly; ways need el["center"]
+        # Resolve centroid: nodes have lat/lon; ways give el["center"]
         if el_type == "node":
             elat = el.get("lat")
             elon = el.get("lon")
@@ -130,13 +141,13 @@ async def get_osm_crowd_grid(
         if not (0 <= gi < dim and 0 <= gj < dim):
             continue
 
-        # ── Signal 1: amenity nodes (commercial / public activity) ────────────
+        # ── Signal 1: amenity nodes ────────────────────────────────────────────
         if "amenity" in tags:
             amenity_counts[gi, gj] += 1.0
 
-        # ── Signal 2: residential building ways (where people live) ───────────
-        if el_type == "way" and tags.get("building") in _RESIDENTIAL_BUILDING_TYPES:
-            building_counts[gi, gj] += 1.0
+        # ── Signal 2: residential landuse zone centroid ────────────────────────
+        if el_type == "way" and tags.get("landuse") in {"residential", "housing"}:
+            landuse_counts[gi, gj] += 1.0
 
         # ── Obstacle: aviation-relevant structures ─────────────────────────────
         if "man_made" in tags or "power" in tags:
@@ -144,13 +155,12 @@ async def get_osm_crowd_grid(
 
     # Normalise each signal to [0, 1]
     amenity_score  = np.minimum(amenity_counts  / _AMENITY_MAX,  1.0)
-    building_score = np.minimum(building_counts / _BUILDING_MAX, 1.0)
+    landuse_score  = np.minimum(landuse_counts  / _LANDUSE_MAX,  1.0)
     obstacle_grid  = np.minimum(obstacle_counts / _OBSTACLE_MAX, 1.0)
 
-    # crowd = max of both signals: a cell is crowded if EITHER amenities OR
-    # residential buildings are dense — captures both market areas and housing
-    # estates that amenity-only queries would miss.
-    crowd_grid = np.maximum(amenity_score, building_score)
+    # crowd = max of both signals
+    # A cell is "crowded" if it has many amenities OR it is inside a residential zone
+    crowd_grid = np.maximum(amenity_score, landuse_score)
 
     _CROWD_CACHE.update({"key": key, "crowd": crowd_grid, "obstacle": obstacle_grid})
     return crowd_grid, obstacle_grid

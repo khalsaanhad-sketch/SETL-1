@@ -649,6 +649,24 @@ function draw(data) {
     true    // more traffic = higher risk
   ));
 
+  // ── C4b: Crowd Density — max OSM crowd score across the 9×9 risk grid ────
+  // "crowd" is the per-cell OSM signal (amenity nodes + residential landuse),
+  // retained in the WS cells payload so we can surface it here.
+  const crowdScores  = (data.cells || []).map(c => c.crowd ?? 0);
+  const maxCrowd     = crowdScores.length ? Math.max(...crowdScores) : null;
+  const meanCrowd    = crowdScores.length ? crowdScores.reduce((a,b)=>a+b,0)/crowdScores.length : null;
+  if (maxCrowd != null) {
+    const crowdLabel = `max ${Math.round(maxCrowd * 100)}%  avg ${Math.round(meanCrowd * 100)}%`;
+    layersEl.appendChild(_scoredRow(
+      "Crowd Density",
+      crowdLabel,
+      maxCrowd,   // score: 0=empty→green, 1=dense→red
+      true        // higher crowd = higher risk
+    ));
+  } else {
+    layersEl.appendChild(_scoredRow("Crowd Density", "No data", null));
+  }
+
   // ── C5: Runway Option — nearest aerodrome distance ────────────────────────
   if (_nearestAirport) {
     const rwyScore = Math.max(0, Math.min(1, 1 - _nearestAirport.dist_km / 150));

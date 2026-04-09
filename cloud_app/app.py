@@ -155,9 +155,11 @@ def generate_cells(state, terrain, prob, weather=None,
     # ── AHP → TOPSIS → Logistic ───────────────────────────────────────────────
     cells = score_cells(cells)
 
-    # ── Strip internal-only TOPSIS input fields before sending to frontend ────
+    # ── Strip pure-TOPSIS internals before sending to frontend ──────────────
+    # NOTE: "crowd" is intentionally retained so the frontend can display
+    #       per-cell crowd density in the Layers panel.
     for c in cells:
-        for key in ("roughness", "distance", "wind", "crowd", "obstacle", "surface"):
+        for key in ("roughness", "distance", "wind", "obstacle", "surface"):
             c.pop(key, None)
 
     return cells
