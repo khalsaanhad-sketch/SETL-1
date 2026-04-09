@@ -81,7 +81,7 @@ def _apply_land_floor(prob: float, slope: float, roughness: float,
     """
     # Very flat, clear terrain (runway / airstrip quality) → green floor
     if slope < 2.0 and roughness < 3.0 and crowd < 0.15 and obstacle < 0.15:
-        return max(prob, 0.73)
+        return max(prob, 0.76)
 
     # Flat, open terrain (good emergency LZ) → at worst amber
     if slope < 5.0 and roughness < 8.0 and crowd < 0.35 and obstacle < 0.30:
