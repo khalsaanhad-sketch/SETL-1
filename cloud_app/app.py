@@ -21,6 +21,7 @@ from cloud_app.services.crowd_engine import get_osm_crowd_grid
 import cloud_app.services.crowd_engine as _crowd_engine
 from cloud_app.services.runway_engine import apply_runway_bonus, get_cached_runways
 import cloud_app.services.runway_engine as _runway_engine
+from cloud_app.services.log_engine import log_entry, init_log_engine
 
 app = FastAPI()
 
@@ -44,6 +45,8 @@ async def serve_main_js():
     )
 
 sessions = {}
+
+init_log_engine()
 
 
 def ensure_session(sid):
@@ -507,6 +510,22 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "runway_ready":  bool(runways),
                 }
 
+                log_entry({
+                    "ts":           time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "session":      sid,
+                    "lat":          lat,
+                    "lon":          lon,
+                    "alt_ft":       state.get("altitude"),
+                    "speed_kts":    state.get("speed"),
+                    "flight_state": risk.get("flight_state"),
+                    "risk_level":   risk.get("risk_level"),
+                    "prob_success": prob.get("success"),
+                    "wx_source":    weather.get("source"),
+                    "wx_ceiling_ft":weather.get("ceiling_ft"),
+                    "wx_wind_kts":  weather.get("wind_kts"),
+                    "crowd_ready":  crowd_grid is not None,
+                    "runway_ready": bool(runways),
+                })
                 await ws.send_json(result)
 
             except (WebSocketDisconnect, RuntimeError):
