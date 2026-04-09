@@ -38,7 +38,8 @@ async def get_terrain(lat: float, lon: float) -> dict:
     positive for land, and None for missing data.
     """
 
-    elevation = None
+    elevation      = None
+    elevation_live = False   # True only when etopo1 API returned a real value
 
     # ── Single DEM call: etopo1 (global, land + ocean) ──────────────────────
     try:
@@ -48,7 +49,8 @@ async def get_terrain(lat: float, lon: float) -> dict:
             data = resp.json()
             val  = data.get("results", [{}])[0].get("elevation")
             if val is not None:
-                elevation = float(val)
+                elevation      = float(val)
+                elevation_live = True
     except Exception:
         pass
 
@@ -73,19 +75,22 @@ async def get_terrain(lat: float, lon: float) -> dict:
         landing_viable = False
     elif elevation < 50:
         surface_type   = "flat"
-        slope_deg      = round(max(0.5, elevation / 500 * 3), 2)
+        slope_deg      = round(max(0.5, elevation / 500 * 3), 2) if elevation_live else 1.5
         landing_viable = True
     elif elevation < 500:
         surface_type   = "hilly"
-        slope_deg      = round(3 + elevation / 500 * 7, 2)
+        # When elevation is real (API), derive slope proportionally.
+        # When it is the 300 m land-fallback, the true elevation is unknown —
+        # use a conservative 2° rather than the misleading 7.2° that 300 m produces.
+        slope_deg      = round(3 + elevation / 500 * 7, 2) if elevation_live else 2.0
         landing_viable = True
     elif elevation < 1500:
         surface_type   = "mountainous"
-        slope_deg      = round(10 + (elevation - 500) / 1000 * 15, 2)
+        slope_deg      = round(10 + (elevation - 500) / 1000 * 15, 2) if elevation_live else 3.0
         landing_viable = True
     else:
         surface_type   = "high_mountain"
-        slope_deg      = round(min(40, 25 + (elevation - 1500) / 1000 * 10), 2)
+        slope_deg      = round(min(40, 25 + (elevation - 1500) / 1000 * 10), 2) if elevation_live else 5.0
         landing_viable = False      # Extreme altitude
 
     return {
