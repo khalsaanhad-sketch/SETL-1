@@ -16,3 +16,12 @@ python-multipart
 scipy
 uvicorn[standard]
 websockets
+fastapi
+httpx
+jinja2
+numpy
+pillow
+python-multipart
+scipy
+uvicorn[standard]
+websockets
