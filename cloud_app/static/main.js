@@ -211,19 +211,39 @@ function trafficIcon(selected = false) {
   });
 }
 
-// ── Airplane SVG icon for the selected aircraft ───────────────────────────────
-// The SVG nose points "up" (north) at heading=0; a CSS rotate() aligns it to
-// any heading.  The outer div is a fixed square so Leaflet iconAnchor is stable
-// regardless of rotation angle.
+// ── Map bearing helper + airplane icon ───────────────────────────────────────
+// Leaflet.Rotate's setBearing(B) applies CSS rotate(+B°) — CW rotation.
+// To make geographic heading H appear at screen-top ("heading-up"):
+//   we need CSS rotate(−H°), so we call setBearing(360 − H).
+// When no aircraft is selected (area mode) we call setBearing(0) = north-up.
+function setMapBearing(headingDeg) {
+  if (!map.setBearing) return;
+  const bearing = ((360 - headingDeg) % 360 + 360) % 360;  // always 0–359
+  map.setBearing(bearing);
+}
+
 function airplaneIcon(headingDeg) {
-  const sz = 44;   // outer container (px) — large enough for any rotation
+  // Container is 44×44 px so the rotated 30 px SVG never gets clipped.
+  // The SVG nose tip (y=2 in a 24-unit viewBox rendered at 30 px):
+  //   container offset = (44−30)/2 + 2*(30/24) ≈ 10 px from the container top.
+  // iconAnchor = [22, 10] → the aircraft's lat/lon is placed at the nose tip,
+  // so the risk grid (which starts at lat/lon) begins right at the nose.
+  //
+  // Net screen rotation in heading-up mode:
+  //   map pane CSS rotate(+(360−H)°)  +  SVG CSS rotate(+H°)  =  360° ≡ 0°
+  // → the nose points screen-UP = forward direction ✓
+  // In north-up (area) mode:
+  //   map pane rotate(0°)  +  SVG rotate(+H°)  =  H°
+  // → the nose points in the heading direction ✓
+  const sz  = 44;
+  const tip = 10;   // nose y-offset from container top (pre-rotation reference)
   return L.divIcon({
     className: "",
     html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="30" height="30"
            style="transform:rotate(${headingDeg}deg);transform-origin:center;overflow:visible;
-                  filter:drop-shadow(0 0 5px rgba(128,255,219,0.85));">
-        <!-- fuselage: nose at top (y=2) for heading=0° = north -->
+                  filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));">
+        <!-- fuselage: nose at top (y=2) → heading=0° points screen-up (north) -->
         <polygon points="12,2 14.5,14 12,12.5 9.5,14"
                  fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
         <!-- wings -->
@@ -235,7 +255,7 @@ function airplaneIcon(headingDeg) {
       </svg>
     </div>`,
     iconSize:   [sz, sz],
-    iconAnchor: [sz / 2, sz / 2],
+    iconAnchor: [sz / 2, tip],  // nose tip at the aircraft's lat/lon
   });
 }
 
@@ -356,7 +376,7 @@ async function selectAircraft(ac) {
 
   // Rotate map to aircraft heading (heading-up mode) before flyTo so the
   // animation lands with the correct bearing already set.
-  if (map.setBearing) map.setBearing(ac.heading_deg);
+  setMapBearing(ac.heading_deg);
 
   // Zoom 12: tight enough to show the 9×9 risk grid clearly in nose-forward mode
   map.flyTo([ac.latitude, ac.longitude], 12, { animate: true, duration: 0.8 });
@@ -818,7 +838,7 @@ function draw(data) {
   // Runs every WS tick (≈1.5 s) so bearing stays current as the aircraft turns.
   // Also pans the map to follow the aircraft when it has moved > 0.5 km.
   if (selectedAcId) {
-    if (map.setBearing) map.setBearing(currentHdg);
+    setMapBearing(currentHdg);
 
     // Update airplane icon rotation on the marker
     if (selectedAcMarker) {
@@ -1059,7 +1079,7 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
 
   // Restore north-up map orientation
-  if (map.setBearing) map.setBearing(0);
+  setMapBearing(0);
 
   // Re-centre the risk grid on home; switch back to area (centred, north-aligned) grid
   await fetch(`/api/live-state/${sessionId}`, {
