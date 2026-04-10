@@ -588,13 +588,13 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "lat":             lat,
                     "lon":             lon,
                     # ── Aircraft state ───────────────────────────────────────
-                    "alt_ft":          state.get("altitude"),
-                    "speed_kts":       state.get("speed"),
+                    "alt_ft":          state.get("altitude_ft"),   # fix: was "altitude"
+                    "speed_kts":       state.get("speed_kts"),     # fix: was "speed"
                     "heading_deg":     state.get("heading_deg"),
                     "vs_fpm":          state.get("vs_fpm"),
                     # ── Risk & probability ───────────────────────────────────
                     "flight_state":    risk.get("flight_state"),
-                    "risk_level":      risk.get("risk_level"),
+                    "risk_level":      risk.get("level"),          # fix: was "risk_level"
                     "prob_success":    prob.get("success"),
                     # ── Decision quality ─────────────────────────────────────
                     "best_cell_prob":     _best_prob,

@@ -153,7 +153,7 @@ async function fetchNearestRoad(lat, lon) {
 }
 
 // ── Risk grid (computed client-side from backend risk score) ─────────────────
-function computeGrid(lat, lon, baseRisk, gridSize = 8, cellDeg = 0.004) {
+function computeGrid(lat, lon, baseRisk, gridSize = 9, cellDeg = 0.004) {
   const cells = [];
   const half  = gridSize / 2;
   const seed  = (Math.abs(lat * 100) % 997) + (Math.abs(lon * 100) % 997);
@@ -455,8 +455,10 @@ async function fetchAircraft() {
     ]);
 
     // ── Normalise ADS-B feed ──
+    // Use != null (not truthy) so aircraft at lat=0 or lon=0 (equator / prime
+    // meridian — valid global coordinates) are never silently discarded.
     const adsbFeed = (backendRes.ac || [])
-      .filter((ac) => ac.lat && ac.lon)
+      .filter((ac) => ac.lat != null && ac.lon != null)
       .map((ac) => ({
         id:          ac.hex || "",
         callsign:    (ac.flight || "").trim() || ac.hex || "",
@@ -976,11 +978,18 @@ async function searchLocation(query) {
     document.getElementById("decisionBox").innerHTML = loading;
     document.getElementById("opsInfo").innerHTML     = loading;
 
-    // Tell backend about the new location before the next WS tick
+    // Tell backend about the new location before the next WS tick.
+    // Reset altitude/speed to defaults so stale aircraft values from a
+    // previously selected flight do not persist into the new area-mode session.
     await fetch(`/api/live-state/${sessionId}`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ latitude: lat, longitude: lon }),
+      body:    JSON.stringify({
+        latitude:    lat,
+        longitude:   lon,
+        altitude_ft: 5000,
+        speed_kts:   100,
+      }),
     });
 
     // Fetch aircraft — auto-select nearest when results arrive
@@ -1082,13 +1091,16 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   // Restore north-up map orientation
   setMapBearing(0);
 
-  // Re-centre the risk grid on home; switch back to area (centred, north-aligned) grid
+  // Re-centre the risk grid on home; switch back to area (centred, north-aligned) grid.
+  // Also reset altitude/speed to defaults so stale aircraft values do not linger.
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({
       latitude:     currentLat,
       longitude:    currentLon,
+      altitude_ft:  5000,
+      speed_kts:    100,
       heading_deg:  0,
       forward_grid: false,
     }),
