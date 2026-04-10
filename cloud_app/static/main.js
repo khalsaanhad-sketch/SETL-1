@@ -224,18 +224,23 @@ function trafficIcon(selected = false) {
 }
 
 // ── Map bearing helper + airplane icon ───────────────────────────────────────
-// Heading-up map: Leaflet.Rotate setBearing(X) rotates the pane CW by X, so
-// bearing (360-X) faces the top.  We pass (360-H)%360 to make bearing H face
-// the top (CCW by H effectively).  airplaneIcon(H) pre-rotates SVG vertices
-// +H CW.  Net on-screen: +H (vertices) + (−H) (pane CCW) = 0 = nose up =
-// heading direction.  No CSS transform on the SVG — immune to Leaflet.Rotate
-// CSS-composition issues.
+// Architecture (confirmed from leaflet-rotate v0.2.8 source):
+//
+// • setBearing(X) applies CSS rotate(X rad) to the map PANE (CW in screen space),
+//   so bearing (360−X)° faces screen-up.  Passing (360−H)%360 makes bearing H
+//   face screen-up (the heading direction) — correct heading-up display.
+//
+// • Marker icons: Leaflet.Rotate _setPos calls setTransform(el, pos, undefined).
+//   Because bearing=undefined is falsy, the override falls through to the
+//   original Leaflet setTransform — zero CSS rotation is added to the icon.
+//   The icon is only position-translated; SVG-up is always screen-up.
+//
+// • Therefore: in heading-up mode, screen-up = heading direction, and
+//   airplaneIcon(0) (nose at SVG-up) makes the nose point in the heading
+//   direction — no pre-rotation of vertices needed.
 function setMapBearing(headingDeg) {
-  // Leaflet.Rotate setBearing(X) rotates the pane CW by X degrees, so bearing
-  // (360−X) faces the top.  We want bearing headingDeg at the top, which requires
-  // passing (360−headingDeg)%360.  Combined with the icon's +headingDeg vertex
-  // pre-rotation, the net on-screen rotation is headingDeg + (−headingDeg) = 0,
-  // so the nose always points straight up = the heading direction.
+  // setBearing(X) rotates the pane CW by X → bearing (360-X) faces up.
+  // Pass (360-H)%360 so bearing H (the heading direction) faces screen-up.
   if (map.setBearing) map.setBearing((360 - (headingDeg ?? 0)) % 360);
 }
 
@@ -293,7 +298,7 @@ function drawTraffic() {
       // (not in trafficLayer) so it always sits above all other markers and
       // persists independently of trafficLayer.clearLayers() on later ticks.
       selectedAcMarker = L.marker([ac.latitude, ac.longitude], {
-        icon:            airplaneIcon(ac.heading_deg),
+        icon:            airplaneIcon(0),   // 0 = nose at SVG-up = screen-up = heading direction (map is already rotated)
         zIndexOffset:    3000,
         bubblingMouseEvents: false,
       }).addTo(map);
@@ -888,10 +893,13 @@ function draw(data) {
   if (selectedAcId) {
     setMapBearing(currentHdg);
 
-    // Update airplane icon rotation on the marker
+    // Update airplane icon position on the marker.
+    // Icon is always airplaneIcon(0): Leaflet.Rotate does not CSS-rotate marker icons,
+    // only position-translates them.  The map pane is already rotated to put the heading
+    // at the screen top, so SVG-up = screen-up = heading direction.
     if (selectedAcMarker) {
       selectedAcMarker.setLatLng([_riskLat, _riskLon]);
-      selectedAcMarker.setIcon(airplaneIcon(currentHdg));
+      selectedAcMarker.setIcon(airplaneIcon(0));
     }
 
     // Pan the map to follow the aircraft if it has drifted > 0.5 km from centre
