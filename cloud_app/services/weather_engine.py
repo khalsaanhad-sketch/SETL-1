@@ -34,6 +34,7 @@ async def _fetch_metar(lat: float, lon: float) -> dict | None:
         )
 
         wind_speed_kts = round(float(best.get("wspd") or 0), 1)
+        wind_gust_kts  = round(float(best.get("wgst") or wind_speed_kts), 1)
         wind_dir       = int(best.get("wdir") or 0)
 
         # visib is a string in statute miles; "+" means ≥10 SM
@@ -52,11 +53,25 @@ async def _fetch_metar(lat: float, lon: float) -> dict | None:
                     ceiling_ft = int(base) * 100
                     break
 
+        # Precipitation from present-weather codes (wxString field).
+        # METAR has no precipitation rate, so we map codes to mm/h equivalents:
+        #   TS (thunderstorm) → 10 mm/h  |  +RA/SN/GR (heavy) → 8  |
+        #   RA/SN/DZ/GR (moderate) → 3   |  -RA/SN/DZ (light) → 1
+        wx = str(best.get("wxString") or "")
+        precip_mm = 0.0
+        if "TS" in wx:
+            precip_mm = 10.0
+        elif "+" in wx and any(p in wx for p in ("RA", "SN", "GR", "PL")):
+            precip_mm = 8.0
+        elif any(p in wx for p in ("RA", "SN", "GR", "PL", "DZ")):
+            precip_mm = 3.0 if "-" not in wx else 1.0
+
         return {
             "wind_speed_kts":     wind_speed_kts,
+            "wind_gust_kts":      wind_gust_kts,
             "wind_direction_deg": wind_dir,
             "visibility_m":       visibility_m,
-            "precipitation_mm":   0.0,        # METAR has no precipitation rate field
+            "precipitation_mm":   precip_mm,
             "ceiling_ft":         ceiling_ft,
             "confidence":         "real",
             "source":             "metar",
@@ -90,7 +105,7 @@ async def get_weather(lat: float, lon: float) -> dict:
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
             f"&current_weather=true"
-            f"&hourly=visibility,precipitation"
+            f"&hourly=visibility,precipitation,windgusts_10m"
         )
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(url)
@@ -102,9 +117,14 @@ async def get_weather(lat: float, lon: float) -> dict:
         hourly        = data.get("hourly", {})
         visibility    = hourly.get("visibility",    [10000])[0]
         precipitation = hourly.get("precipitation", [0])[0]
+        wind_gust_kmh = hourly.get("windgusts_10m", [wind_speed])[0]
+
+        wind_speed_kts = round(wind_speed    * 0.539957, 1)
+        wind_gust_kts  = round(wind_gust_kmh * 0.539957, 1)
 
         return {
-            "wind_speed_kts":     round(wind_speed * 0.539957, 1),
+            "wind_speed_kts":     wind_speed_kts,
+            "wind_gust_kts":      max(wind_speed_kts, wind_gust_kts),
             "wind_direction_deg": wind_dir,
             "visibility_m":       visibility,
             "precipitation_mm":   precipitation,
@@ -120,6 +140,7 @@ async def get_weather(lat: float, lon: float) -> dict:
     # ── Last resort: static conservative defaults ────────────────────────────
     return {
         "wind_speed_kts":     10.0,
+        "wind_gust_kts":      10.0,
         "wind_direction_deg": 270,
         "visibility_m":       10000,
         "precipitation_mm":   0.0,
