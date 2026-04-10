@@ -64,6 +64,7 @@ def ensure_session(sid):
 
 def generate_cells(state, terrain, prob, weather=None,
                    slope_grid=None, roughness_grid=None,
+                   elev_grid=None,
                    crowd_grid=None, obstacle_grid=None):
     """
     Build a 9×9 risk grid.
@@ -130,25 +131,31 @@ def generate_cells(state, terrain, prob, weather=None,
         else:
             slope = max(0.0, float(slope_grid[gi, gj])) if slope_grid is not None else max(0.0, base_slope)
             roughness     = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
-            surface_score = round(min(1.0, slope / 30.0), 3)
+            surface_score = round(min(1.0, slope / 15.0), 3)   # 15° = aviation unsafe threshold
             crowd_val     = round(float(crowd_grid[gi, gj]),    3) if crowd_grid    is not None else 0.0
             obstacle_val  = round(float(obstacle_grid[gi, gj]), 3) if obstacle_grid is not None else 0.0
             obstacle_conf = "real" if obstacle_grid is not None else "low"
+
+            # Per-cell terrain clearance: aircraft altitude above this cell's terrain
+            cell_elev_m  = float(elev_grid[gi, gj]) if elev_grid is not None else elev
+            clearance_ft = round((state.get("altitude_ft", 5000) - cell_elev_m * 3.28084), 0)
+
             return {
                 "corners":             corners,
                 "is_water":            False,
                 "terrain_confidence":  terrain_conf,
                 "weather_confidence":  weather_conf,
                 "obstacle_confidence": obstacle_conf,
-                "slope":     round(slope, 2),
-                "roughness": round(roughness, 2),
-                "distance":  dist,
-                "wind":      wind_ms,
-                "crowd":     crowd_val,
-                "obstacle":  obstacle_val,
-                "surface":   surface_score,
-                "risk":      0.5,
-                "color":     "#d8d62b",
+                "slope":        round(slope, 2),
+                "roughness":    round(roughness, 2),
+                "distance":     dist,
+                "wind":         wind_ms,
+                "crowd":        crowd_val,
+                "obstacle":     obstacle_val,
+                "surface":      surface_score,
+                "clearance_ft": clearance_ft,
+                "risk":         0.5,
+                "color":        "#d8d62b",
             }
 
     cells = []
@@ -523,11 +530,12 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 runways = get_cached_runways(lat, lon)
 
                 # Terrain, weather, and DEM run in parallel — none blocked by Overpass
-                terrain, weather, (slope_grid, roughness_grid) = await asyncio.gather(
+                terrain, weather, _dem = await asyncio.gather(
                     get_terrain(lat, lon),
                     get_weather(lat, lon),
                     get_terrain_grid(lat, lon),
                 )
+                slope_grid, roughness_grid, elev_grid = _dem
 
                 risk = compute_risk(state, weather)
                 prob = compute_probability(risk)
@@ -540,6 +548,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     weather=weather,
                     slope_grid=slope_grid,
                     roughness_grid=roughness_grid,
+                    elev_grid=elev_grid,
                     crowd_grid=crowd_grid,
                     obstacle_grid=obstacle_grid,
                 )

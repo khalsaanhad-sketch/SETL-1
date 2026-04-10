@@ -155,8 +155,20 @@ def score_cells(cells: list) -> list:
             prob = _apply_land_floor(prob, s, r, c, o)
 
             risk = round(1.0 - prob, 3)
+
+            # ── Terrain clearance hard floor ───────────────────────────────
+            # Altitude above this cell's terrain, regardless of TOPSIS score.
+            # A ridge nearly at aircraft altitude is always critical.
+            clearance_ft = float(cells[idx].get("clearance_ft", 9999))
+            if clearance_ft < 200:
+                risk = max(risk, 0.92)
+            elif clearance_ft < 500:
+                risk = max(risk, 0.72)
+            elif clearance_ft < 1000:
+                risk = max(risk, 0.46)
+
             cells[idx]["risk"]        = risk
-            cells[idx]["probability"] = round(prob, 3)
+            cells[idx]["probability"] = round(1.0 - risk, 3)
             cells[idx]["color"]       = _risk_color(risk, is_water=False)
 
     if water_rows:
