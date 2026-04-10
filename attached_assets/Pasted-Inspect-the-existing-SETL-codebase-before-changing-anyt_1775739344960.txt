@@ -1,0 +1,38 @@
+Inspect the existing SETL codebase before changing anything, especially:
+- cloud_app/app.py
+- cloud_app/services/decision_engine.py
+- cloud_app/services/terrain_engine.py
+- cloud_app/services/crowd_engine.py
+- cloud_app/services/probability_engine.py
+- cloud_app/static/main.js
+
+Make the smallest possible change set to remove hidden randomness from the risk grid while preserving the current project architecture and live data pipeline.
+
+In cloud_app/app.py, remove the two random.uniform usages inside generate_cells() for:
+1) slope fallback
+2) water depth generation
+
+Replace them with deterministic logic only:
+- water depth must be a fixed conservative function of the fetched elevation / terrain context
+- slope fallback must be a fixed function of terrain_engine output, not random jitter
+- same lat/lon/weather/session must always produce the same cell values, risk, probability, and color
+
+Do NOT replace AHP + TOPSIS + logistic regression with arbitrary hand-picked weights.
+Do NOT change the WebSocket payload keys, the 9x9 grid structure, route names, or frontend field names.
+Do NOT downgrade the live API integrations for terrain, weather, aircraft, crowd, or obstacle data.
+
+Keep the current decision_engine.py pipeline intact:
+- AHP weights stay fixed and explicit
+- TOPSIS stays deterministic
+- logistic mapping stays deterministic
+
+If any input data is missing, add a conservative confidence / data-quality flag instead of injecting randomness.
+If terrain, crowd, or obstacle data are unavailable, fall back to safe deterministic defaults and lower confidence, not random values.
+
+Also:
+- remove the unused random import from app.py if it becomes unused
+- keep the current caching behavior
+- keep the current frontend behavior and display structure unchanged
+- only edit the minimum number of lines needed to make the output reproducible and operationally stable
+
+After editing, verify that repeated runs with identical inputs produce identical outputs.
