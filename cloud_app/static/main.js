@@ -224,12 +224,19 @@ function trafficIcon(selected = false) {
 }
 
 // ── Map bearing helper + airplane icon ───────────────────────────────────────
-// Heading-up map: map.setBearing(H) rotates the pane −H° (CCW on screen).
-// airplaneIcon(H) pre-rotates SVG vertices +H° CW.  Net on-screen rotation
-// of the nose = H + (−H) = 0° from "up" = pointing forward.  No CSS transform
-// is applied to the SVG element itself, so there is no CSS-composition issue.
+// Heading-up map: Leaflet.Rotate setBearing(X) rotates the pane CW by X, so
+// bearing (360-X) faces the top.  We pass (360-H)%360 to make bearing H face
+// the top (CCW by H effectively).  airplaneIcon(H) pre-rotates SVG vertices
+// +H CW.  Net on-screen: +H (vertices) + (−H) (pane CCW) = 0 = nose up =
+// heading direction.  No CSS transform on the SVG — immune to Leaflet.Rotate
+// CSS-composition issues.
 function setMapBearing(headingDeg) {
-  if (map.setBearing) map.setBearing(headingDeg ?? 0);
+  // Leaflet.Rotate setBearing(X) rotates the pane CW by X degrees, so bearing
+  // (360−X) faces the top.  We want bearing headingDeg at the top, which requires
+  // passing (360−headingDeg)%360.  Combined with the icon's +headingDeg vertex
+  // pre-rotation, the net on-screen rotation is headingDeg + (−headingDeg) = 0,
+  // so the nose always points straight up = the heading direction.
+  if (map.setBearing) map.setBearing((360 - (headingDeg ?? 0)) % 360);
 }
 
 function airplaneIcon(headingDeg) {
