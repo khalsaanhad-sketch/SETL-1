@@ -107,7 +107,7 @@ async def get_terrain(lat: float, lon: float) -> dict:
 # Cached by quantised position so the batch request only fires when the
 # aircraft moves more than ~5 km from the last cached centre.
 
-_GRID_CACHE: dict = {"key": None, "slope": None, "roughness": None}
+_GRID_CACHE: dict = {"key": None, "slope": None, "roughness": None, "elev": None}
 
 
 def _grid_cache_key(lat: float, lon: float, cell_size: float = 0.01) -> tuple:
@@ -152,7 +152,7 @@ async def get_terrain_grid(
     """
     key = _grid_cache_key(lat, lon, cell_size)
     if _GRID_CACHE["key"] == key and _GRID_CACHE["slope"] is not None:
-        return _GRID_CACHE["slope"], _GRID_CACHE["roughness"]
+        return _GRID_CACHE["slope"], _GRID_CACHE["roughness"], _GRID_CACHE["elev"]
 
     dim = 2 * steps + 1   # 9 for steps=4
 
@@ -178,10 +178,10 @@ async def get_terrain_grid(
         slope     = compute_slope_grid(grid)
         roughness = compute_roughness_grid(grid)
 
-        _GRID_CACHE.update({"key": key, "slope": slope, "roughness": roughness})
-        return slope, roughness
+        _GRID_CACHE.update({"key": key, "slope": slope, "roughness": roughness, "elev": grid})
+        return slope, roughness, grid
 
     except Exception:
         # Cache the failure at this position so we don't hammer the API
-        _GRID_CACHE.update({"key": key, "slope": None, "roughness": None})
-        return None, None
+        _GRID_CACHE.update({"key": key, "slope": None, "roughness": None, "elev": None})
+        return None, None, None
