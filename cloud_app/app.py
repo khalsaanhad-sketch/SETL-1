@@ -186,13 +186,29 @@ def generate_cells(state, terrain, prob, weather=None,
                 dl, dn = to_geo(fwd_far,  lat_right); c2 = [lat + dl, lon + dn]
                 dl, dn = to_geo(fwd_near, lat_right); c3 = [lat + dl, lon + dn]
 
-                # DEM grid indices: approximate mapping to the north-aligned DEM
-                gi, gj = r, c
-
                 # Distance from aircraft to cell centre (km)
-                fwd_ctr_m = (8.5 - r) * cell_m
-                lat_ctr_m = (c - 4.0) * cell_m
+                fwd_ctr_m = (8.5 - r) * cell_m   # metres ahead of aircraft
+                lat_ctr_m = (c - 4.0) * cell_m   # metres right of heading (negative = left)
                 dist = round(((fwd_ctr_m ** 2 + lat_ctr_m ** 2) ** 0.5) / 1000, 2)
+
+                # DEM grid indices — accurate geographic mapping.
+                #
+                # The north-aligned DEM is a (2·steps+1)×(2·steps+1) grid sampled at
+                # (lat + i·size, lon + j·size) for i,j ∈ [-steps, +steps].
+                # gi = i + steps  (0 = south edge, steps = centre, 2·steps = north edge)
+                # gj = j + steps  (0 = west  edge, steps = centre, 2·steps = east  edge)
+                #
+                # Previous code used gi,gj = r,c which maps the forward-grid row/column
+                # directly to the north-aligned DEM row/column.  For any heading other
+                # than 0°/360° this produces a mis-sample that averages ~7 km at H=150°.
+                #
+                # Fix: rotate the body-frame cell-centre offset back to geographic
+                # north/east, then convert to DEM array indices.  Cells that extend
+                # beyond the ±steps·size° DEM footprint are clamped to the nearest edge.
+                dn_ctr = fwd_ctr_m * _math.cos(heading_rad) - lat_ctr_m * _math.sin(heading_rad)
+                de_ctr = fwd_ctr_m * _math.sin(heading_rad) + lat_ctr_m * _math.cos(heading_rad)
+                gi = max(0, min(2 * steps, round(dn_ctr / m_per_lat / size) + steps))
+                gj = max(0, min(2 * steps, round(de_ctr / m_per_lon / size) + steps))
 
                 cells.append(_build_cell([c0, c1, c2, c3], gi, gj, dist))
 
