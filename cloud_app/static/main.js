@@ -212,50 +212,51 @@ function trafficIcon(selected = false) {
 }
 
 // ── Map bearing helper + airplane icon ───────────────────────────────────────
-// Leaflet.Rotate's setBearing(B) applies CSS rotate(+B°) — CW rotation.
-// To make geographic heading H appear at screen-top ("heading-up"):
-//   we need CSS rotate(−H°), so we call setBearing(360 − H).
-// When no aircraft is selected (area mode) we call setBearing(0) = north-up.
-function setMapBearing(headingDeg) {
-  if (!map.setBearing) return;
-  const bearing = ((360 - headingDeg) % 360 + 360) % 360;  // always 0–359
-  map.setBearing(bearing);
+// Map stays north-up at all times.  Aircraft heading is shown exclusively via
+// the icon's pre-rotated polygon vertices (no CSS transform involved), which
+// avoids any browser/Leaflet.Rotate CSS-composition issues.
+function setMapBearing(_headingDeg) {
+  if (map.setBearing) map.setBearing(0);   // always north-up
 }
 
 function airplaneIcon(headingDeg) {
-  // Container is 44×44 px so the rotated 30 px SVG is never clipped.
-  // iconAnchor = [sz/2, sz/2] → aircraft lat/lon is pinned to the CENTRE of the
-  // container.  This is rotation-invariant: no matter what heading-up bearing the
-  // map is set to, the anchor stays exactly over the lat/lon pixel. Using the
-  // nose-tip offset [sz/2, 10] caused a heading-dependent 0–12 px screen-space
-  // drift that made the icon appear to "jump" as the map rotated.
+  // Pre-rotate every SVG vertex by headingDeg CW around the viewBox centre
+  // (12, 12).  No CSS transform is applied to the SVG, so the nose direction
+  // is determined entirely by geometry — immune to any CSS-composition or
+  // Leaflet.Rotate _setPos side-effects.
   //
-  // Net screen rotation in heading-up mode:
-  //   map pane CSS rotate(+(360−H)°)  +  SVG CSS rotate(+H°)  =  360° ≡ 0°
-  // → nose points screen-UP = forward direction ✓
-  // In north-up (area) mode:
-  //   map pane rotate(0°)  +  SVG rotate(+H°)  =  H°
-  // → nose points in the heading direction on the north-up map ✓
+  // CW rotation by angle H in SVG / screen y-down space around (cx, cy):
+  //   x' = cx + (x-cx)*cos(H) - (y-cy)*sin(H)
+  //   y' = cy + (x-cx)*sin(H) + (y-cy)*cos(H)
+  // Verified: H=0 → identity; H=90 → nose (12,2) → (22,12) = screen-right ✓
+  //           H=180 → nose → (12,22) = screen-bottom ✓
+  //           H=150 → nose → (17,20.66) = SSE on north-up map ✓
+  const rad = headingDeg * Math.PI / 180;
+  const C = Math.cos(rad), S = Math.sin(rad);
+  const cx = 12, cy = 12;
+  function r(x, y) {
+    const dx = x - cx, dy = y - cy;
+    return `${(cx + dx * C - dy * S).toFixed(2)},${(cy + dx * S + dy * C).toFixed(2)}`;
+  }
+
+  // Original vertices (nose at y=2 = top → heading 0° = north)
+  const fuse  = [r(12,2),  r(14.5,14), r(12,12.5), r(9.5,14) ].join(' ');
+  const wings = [r(12,10), r(22,18),   r(21,20),   r(12,15),  r(3,20), r(2,18)].join(' ');
+  const tail  = [r(12,15), r(13.5,22), r(12,21),   r(10.5,22)].join(' ');
+
   const sz = 44;
   return L.divIcon({
     className: "",
     html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="30" height="30"
-           style="transform:rotate(${headingDeg}deg);transform-origin:center;overflow:visible;
-                  filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));">
-        <!-- fuselage: nose at top (y=2) → heading=0 deg points screen-up (north) -->
-        <polygon points="12,2 14.5,14 12,12.5 9.5,14"
-                 fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
-        <!-- wings -->
-        <polygon points="12,10 22,18 21,20 12,15 3,20 2,18"
-                 fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
-        <!-- tail stabiliser -->
-        <polygon points="12,15 13.5,22 12,21 10.5,22"
-                 fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
+           style="overflow:visible;filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));">
+        <polygon points="${fuse}"  fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
+        <polygon points="${wings}" fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
+        <polygon points="${tail}"  fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
       </svg>
     </div>`,
     iconSize:   [sz, sz],
-    iconAnchor: [sz / 2, sz / 2],  // centre — rotation-invariant
+    iconAnchor: [sz / 2, sz / 2],  // centre of icon = aircraft lat/lon (rotation-invariant)
   });
 }
 
