@@ -223,27 +223,27 @@ function setMapBearing(headingDeg) {
 }
 
 function airplaneIcon(headingDeg) {
-  // Container is 44×44 px so the rotated 30 px SVG never gets clipped.
-  // The SVG nose tip (y=2 in a 24-unit viewBox rendered at 30 px):
-  //   container offset = (44−30)/2 + 2*(30/24) ≈ 10 px from the container top.
-  // iconAnchor = [22, 10] → the aircraft's lat/lon is placed at the nose tip,
-  // so the risk grid (which starts at lat/lon) begins right at the nose.
+  // Container is 44×44 px so the rotated 30 px SVG is never clipped.
+  // iconAnchor = [sz/2, sz/2] → aircraft lat/lon is pinned to the CENTRE of the
+  // container.  This is rotation-invariant: no matter what heading-up bearing the
+  // map is set to, the anchor stays exactly over the lat/lon pixel. Using the
+  // nose-tip offset [sz/2, 10] caused a heading-dependent 0–12 px screen-space
+  // drift that made the icon appear to "jump" as the map rotated.
   //
   // Net screen rotation in heading-up mode:
   //   map pane CSS rotate(+(360−H)°)  +  SVG CSS rotate(+H°)  =  360° ≡ 0°
-  // → the nose points screen-UP = forward direction ✓
+  // → nose points screen-UP = forward direction ✓
   // In north-up (area) mode:
   //   map pane rotate(0°)  +  SVG rotate(+H°)  =  H°
-  // → the nose points in the heading direction ✓
-  const sz  = 44;
-  const tip = 10;   // nose y-offset from container top (pre-rotation reference)
+  // → nose points in the heading direction on the north-up map ✓
+  const sz = 44;
   return L.divIcon({
     className: "",
     html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="30" height="30"
            style="transform:rotate(${headingDeg}deg);transform-origin:center;overflow:visible;
                   filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));">
-        <!-- fuselage: nose at top (y=2) → heading=0° points screen-up (north) -->
+        <!-- fuselage: nose at top (y=2) → heading=0 deg points screen-up (north) -->
         <polygon points="12,2 14.5,14 12,12.5 9.5,14"
                  fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
         <!-- wings -->
@@ -255,7 +255,7 @@ function airplaneIcon(headingDeg) {
       </svg>
     </div>`,
     iconSize:   [sz, sz],
-    iconAnchor: [sz / 2, tip],  // nose tip at the aircraft's lat/lon
+    iconAnchor: [sz / 2, sz / 2],  // centre — rotation-invariant
   });
 }
 
