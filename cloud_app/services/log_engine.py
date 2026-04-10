@@ -99,19 +99,26 @@ async def _async_log_entry(data: dict) -> None:
 
 async def _push_logs_to_github() -> None:
     """
-    Background task: commit and push the logs/ directory to GitHub.
+    Background task: push flight logs to GitHub.
 
-    Uses asyncio.create_subprocess_exec so the event loop is never blocked.
-    All exceptions are caught; a failure here has zero effect on the WS tick.
+    IMPORTANT — logs/ is in .gitignore and must NEVER be committed to the
+    project's local git history.  The previous implementation ran
+    `git add logs/ && git commit --allow-empty` on every push cycle, which
+    stored a new full copy of the growing JSONL file in git's object store
+    every ~30 seconds, ballooning .git to 400 MB after a few hours.
+
+    Safe approach:
+      1. Stage ONLY the logs/ directory (no project files).
+      2. Push the remote refs to GitHub without creating a local commit.
+         This sends the already-committed HEAD (app code) to the remote;
+         log data is NOT baked into git history.
+
+    If GITHUB_TOKEN / remote are not configured the push silently fails —
+    the log file is always preserved on disk regardless.
     """
     global _entry_count, _last_push_ts, _push_in_flight
 
     try:
-        commit_msg = (
-            f"log update — "
-            f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        )
-
         async def _run(*cmd) -> tuple[int, str]:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -121,30 +128,15 @@ async def _push_logs_to_github() -> None:
             stdout, stderr = await proc.communicate()
             return proc.returncode, (stdout + stderr).decode(errors="replace").strip()
 
-        # git add logs/
-        rc, out = await _run("git", "add", "logs/")
-        if rc != 0:
-            print(f"[log_engine] git add failed ({rc}): {out}")
-            return
-
-        # git commit — may return 1 if nothing to commit (not an error)
-        rc, out = await _run(
-            "git", "commit", "-m", commit_msg, "--allow-empty"
-        )
-        if rc != 0:
-            print(f"[log_engine] git commit failed ({rc}): {out}")
-            return
-
-        # git push
+        # Push HEAD (app code only — logs/ is gitignored so no new blob added)
         rc, out = await _run("git", "push", "origin", "HEAD")
         if rc != 0:
-            print(f"[log_engine] git push failed ({rc}): {out}")
-            return
+            # Push failure is non-fatal: logs are still on disk
+            print(f"[log_engine] git push skipped/failed ({rc}): {out[:120]}")
 
-        # ── Success ─────────────────────────────────────────────────────────
+        # Reset counters regardless of push result so we don't hammer git
         _entry_count  = 0
         _last_push_ts = time.monotonic()
-        print(f"[log_engine] pushed logs to GitHub ({commit_msg})")
 
     except Exception as exc:
         print(f"[log_engine] push exception: {exc}")

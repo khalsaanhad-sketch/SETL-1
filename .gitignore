@@ -12,3 +12,11 @@ build/
 venv/
 .cache/
 *.log
+
+# Runtime-generated log files — never commit to project history.
+# GitHub sync is handled directly by log_engine (git push only, no local commit).
+logs/
+*.jsonl
+
+# Conversation screenshot attachments — large binaries, not source code.
+attached_assets/
