@@ -91,6 +91,16 @@ function haversine(lat1, lon1, lat2, lon2) {
   return Math.round(6371 * 2 * Math.asin(Math.sqrt(a)) * 10) / 10;
 }
 
+// Compass bearing (0–360°) from point 1 to point 2.
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const y   = Math.sin(Δλ) * Math.cos(φ2);
+  const x   = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
 // ── Overpass helpers — nearest airport & road (cached, fired in background) ───
 const _OVERPASS = "https://overpass-api.de/api/interpreter";
 
@@ -119,9 +129,11 @@ async function fetchNearestAirport(lat, lon) {
       if (d < bestDist) { bestDist = d; best = { ...el, lat: eLat, lon: eLon }; }
     }
     _nearestAirport = best
-      ? { name: best.tags?.name || "Unknown",
-          icao: best.tags?.icao || best.tags?.iata || "",
-          dist_km: Math.round(bestDist * 10) / 10 }
+      ? { name:     best.tags?.name || "Unknown",
+          icao:     best.tags?.icao || best.tags?.iata || "",
+          dist_km:  Math.round(bestDist * 10) / 10,
+          lat:      best.lat,   // stored for real-time distance + bearing updates
+          lon:      best.lon }
       : null;
   } catch (_) { _nearestAirport = null; }
 }
@@ -212,11 +224,12 @@ function trafficIcon(selected = false) {
 }
 
 // ── Map bearing helper + airplane icon ───────────────────────────────────────
-// Map stays north-up at all times.  Aircraft heading is shown exclusively via
-// the icon's pre-rotated polygon vertices (no CSS transform involved), which
-// avoids any browser/Leaflet.Rotate CSS-composition issues.
-function setMapBearing(_headingDeg) {
-  if (map.setBearing) map.setBearing(0);   // always north-up
+// Heading-up map: map.setBearing(H) rotates the pane −H° (CCW on screen).
+// airplaneIcon(H) pre-rotates SVG vertices +H° CW.  Net on-screen rotation
+// of the nose = H + (−H) = 0° from "up" = pointing forward.  No CSS transform
+// is applied to the SVG element itself, so there is no CSS-composition issue.
+function setMapBearing(headingDeg) {
+  if (map.setBearing) map.setBearing(headingDeg ?? 0);
 }
 
 function airplaneIcon(headingDeg) {
@@ -384,7 +397,11 @@ async function selectAircraft(ac) {
   drawTraffic();
   drawTrafficList();
 
-  // Fire background context fetches — result appears in Layers/Decision on next draw()
+  // Fire background context fetches — result appears in Layers/Decision on next draw().
+  // Reset cache keys so a newly selected aircraft always gets a fresh lookup even
+  // if it happens to be at the same quantised position as the previous one.
+  _airportFetchKey = "";
+  _roadFetchKey    = "";
   fetchNearestAirport(ac.latitude, ac.longitude);
   fetchNearestRoad(ac.latitude, ac.longitude);
   // Do NOT redraw with latestData here — it holds home-position cells that are
@@ -658,13 +675,30 @@ function draw(data) {
         `<strong>Safest LZ</strong><span>Water &mdash; no land LZ</span></div>`;
     }
 
-    // B — Nearest airport from Overpass (populated async after aircraft selection)
+    // B — Nearest airport from Overpass (populated async after aircraft selection).
+    // Distance and bearing are recalculated live from the aircraft's current position
+    // every WS tick so they stay accurate as the flight moves.
     let aptHtml = "";
     if (_nearestAirport) {
       const tag = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
+      let distBrgStr;
+      if (_nearestAirport.lat != null && _nearestAirport.lon != null) {
+        const liveDist = Math.round(haversine(_riskLat, _riskLon,
+                                              _nearestAirport.lat, _nearestAirport.lon) * 10) / 10;
+        const liveBrg  = Math.round(bearingTo(_riskLat, _riskLon,
+                                              _nearestAirport.lat, _nearestAirport.lon));
+        distBrgStr = `${liveDist} km · ${liveBrg}°`;
+      } else {
+        distBrgStr = `${_nearestAirport.dist_km} km`;
+      }
       aptHtml = `<div class="lz-item">` +
         `<strong>Nearest airport</strong>` +
-        `<span>${esc(_nearestAirport.name)}${esc(tag)} &mdash; ${_nearestAirport.dist_km} km</span>` +
+        `<span>${esc(_nearestAirport.name)}${esc(tag)} &mdash; ${distBrgStr}</span>` +
+        `</div>`;
+    } else {
+      aptHtml = `<div class="lz-item">` +
+        `<strong>Nearest airport</strong>` +
+        `<span style="color:#4a5a7a;font-style:italic">Searching&hellip;</span>` +
         `</div>`;
     }
 
@@ -768,13 +802,17 @@ function draw(data) {
     }
   }
 
-  // ── C5: Runway Option — nearest aerodrome distance ────────────────────────
+  // ── C5: Runway Option — nearest aerodrome distance (updated live) ───────────
   if (_nearestAirport) {
-    const rwyScore = Math.max(0, Math.min(1, 1 - _nearestAirport.dist_km / 150));
+    const liveDist = (_nearestAirport.lat != null && _nearestAirport.lon != null)
+      ? Math.round(haversine(_riskLat, _riskLon,
+                             _nearestAirport.lat, _nearestAirport.lon) * 10) / 10
+      : _nearestAirport.dist_km;
+    const rwyScore = Math.max(0, Math.min(1, 1 - liveDist / 150));
     const tag      = _nearestAirport.icao ? ` (${_nearestAirport.icao})` : "";
     layersEl.appendChild(_scoredRow(
       "Runway Option",
-      `${_nearestAirport.dist_km} km${tag}`,
+      `${liveDist} km${tag}`,
       rwyScore,
       false   // closer airport = greener
     ));
