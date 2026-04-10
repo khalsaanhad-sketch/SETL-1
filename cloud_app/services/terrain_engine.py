@@ -1,6 +1,5 @@
 import httpx
 import numpy as np
-from scipy.ndimage import generic_filter
 
 
 def _ocean_estimate(lat: float, lon: float) -> float:
@@ -130,8 +129,11 @@ def compute_roughness_grid(elevation_grid: np.ndarray) -> np.ndarray:
     """
     Terrain roughness: standard deviation of elevation in a 3×3 neighbourhood.
     Higher values indicate irregular / broken ground — harder to land on.
+    Pure-numpy implementation using sliding_window_view (no scipy needed).
     """
-    return generic_filter(elevation_grid, np.std, size=3)
+    padded  = np.pad(elevation_grid, 1, mode="reflect")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (3, 3))
+    return windows.std(axis=(-2, -1))
 
 
 async def get_terrain_grid(
