@@ -46,6 +46,8 @@ let selectedAcId     = null;
 let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData            = null;
+let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
+let _cachedOskyLocal      = [];     // local OpenSky results, persist between fetchAircraft() calls
 // Risk state — position posted to /api/live-state for risk grid calculation.
 // Follows selected aircraft; falls back to home base when nothing is selected.
 let _riskLat    = 28.6139;
