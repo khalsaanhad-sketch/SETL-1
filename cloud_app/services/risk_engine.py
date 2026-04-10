@@ -10,10 +10,12 @@ def compute_risk(state: dict, weather: dict | None = None) -> dict:
     if altitude <= 100 and speed <= 60:
         weather_risk = 0.0
         if weather:
-            wind_kts = weather.get("wind_speed_kts", 0.0)
-            if wind_kts > 50:
+            wind_kts      = weather.get("wind_speed_kts", 0.0)
+            wind_gust_kts = weather.get("wind_gust_kts", wind_kts)
+            effective_wind = max(wind_kts, wind_gust_kts)
+            if effective_wind > 50:
                 weather_risk = 0.10
-            elif wind_kts > 30:
+            elif effective_wind > 30:
                 weather_risk = 0.05
         overall = round(min(0.15, weather_risk), 3)
         return {
@@ -37,15 +39,38 @@ def compute_risk(state: dict, weather: dict | None = None) -> dict:
     # ── Weather modifiers ─────────────────────────────────────────────────────
     weather_risk = 0.0
     if weather:
-        wind_kts    = weather.get("wind_speed_kts",    0.0)
-        vis_m       = weather.get("visibility_m",   10000.0)
-        precip_mm   = weather.get("precipitation_mm",  0.0)
+        wind_kts      = weather.get("wind_speed_kts",    0.0)
+        wind_gust_kts = weather.get("wind_gust_kts",  wind_kts)
+        vis_m         = weather.get("visibility_m",   10000.0)
+        precip_mm     = weather.get("precipitation_mm",  0.0)
+        ceiling_ft    = weather.get("ceiling_ft",         None)
 
-        # Wind: >30 kts controllability degrades; >50 kts approach essentially unsafe
-        if wind_kts > 50:
+        # Wind: use the worse of steady wind and gust for risk assessment.
+        # Gusts define actual aircraft control difficulty, not mean wind.
+        # >50 kts: approach essentially unsafe; >35 kts: controllability degrades.
+        # Gust spread ≥15 kts adds extra risk even when mean wind is acceptable.
+        effective_wind = max(wind_kts, wind_gust_kts)
+        gust_spread    = wind_gust_kts - wind_kts
+        if effective_wind > 50:
             weather_risk += 0.35
-        elif wind_kts > 30:
-            weather_risk += 0.15
+        elif effective_wind > 35:
+            weather_risk += 0.20
+        elif effective_wind > 20:
+            weather_risk += 0.08
+        if gust_spread >= 15:
+            weather_risk += 0.08   # Significant gust spread → unstable approach
+
+        # Ceiling: required for visual identification of any LZ.
+        # <200 ft: below IFR minimums for any approach — LZ cannot be seen.
+        # <500 ft: marginal; emergency visual approach extremely difficult.
+        # <1000 ft: reduced situational awareness for terrain avoidance.
+        if ceiling_ft is not None:
+            if ceiling_ft < 200:
+                weather_risk += 0.30
+            elif ceiling_ft < 500:
+                weather_risk += 0.20
+            elif ceiling_ft < 1000:
+                weather_risk += 0.10
 
         # Visibility: <3000 m VMC marginal; <800 m LZ not visually identifiable
         if vis_m < 800:
@@ -53,9 +78,16 @@ def compute_risk(state: dict, weather: dict | None = None) -> dict:
         elif vis_m < 3000:
             weather_risk += 0.15
 
-        # Precipitation: >5 mm/h contaminated surface, reduced braking
-        if precip_mm > 5:
-            weather_risk += 0.10
+        # Precipitation: graduated from light to thunderstorm.
+        # TS (10 mm/h) → severe turbulence, lightning, windshear.
+        # Heavy (8 mm/h) → surface contamination, braking action nil.
+        # Moderate (3 mm/h) → degraded braking.
+        if precip_mm >= 8:
+            weather_risk += 0.20
+        elif precip_mm >= 3:
+            weather_risk += 0.12
+        elif precip_mm > 0:
+            weather_risk += 0.05
 
     overall = round(min(1.0, base + weather_risk), 3)
 
