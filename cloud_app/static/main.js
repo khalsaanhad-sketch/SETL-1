@@ -442,11 +442,19 @@ async function fetchOpenSkyDirect() {
   const headers = {};
   if (_oskyAuthHeader) headers["Authorization"] = _oskyAuthHeader;
 
+  console.log("[OpenSky] Browser-direct fetch →", url, _oskyAuthHeader ? "(authenticated)" : "(anonymous)");
+
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(12_000) });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.warn("[OpenSky] HTTP", res.status, res.statusText);
+      return [];
+    }
     const data = await res.json();
-    if (!data.states) return [];
+    if (!data.states) {
+      console.warn("[OpenSky] Response OK but no states field:", data);
+      return [];
+    }
 
     const results = [];
     for (const s of data.states) {
@@ -465,8 +473,10 @@ async function fetchOpenSkyDirect() {
         source:      "opensky",
       });
     }
+    console.log(`[OpenSky] Got ${results.length} airborne aircraft from ${data.states.length} states`);
     return results;
-  } catch (_) {
+  } catch (err) {
+    console.error("[OpenSky] Fetch failed:", err.message || err);
     return [];
   }
 }
