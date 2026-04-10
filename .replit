@@ -37,3 +37,7 @@ externalPort = 80
 [deployment]
 deploymentTarget = "vm"
 run = ["uvicorn", "cloud_app.app:app", "--host", "0.0.0.0", "--port", "5000"]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 60000
