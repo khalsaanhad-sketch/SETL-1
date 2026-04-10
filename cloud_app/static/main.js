@@ -272,16 +272,16 @@ function airplaneIcon(headingDeg) {
   const sz = 44;
   return L.divIcon({
     className: "",
-    html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+    html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;cursor:pointer;">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="30" height="30"
-           style="overflow:visible;filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));">
+           style="overflow:visible;filter:drop-shadow(0 0 6px rgba(128,255,219,0.9));pointer-events:none;">
         <polygon points="${fuse}"  fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
         <polygon points="${wings}" fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
         <polygon points="${tail}"  fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
       </svg>
     </div>`,
     iconSize:   [sz, sz],
-    iconAnchor: [sz / 2, sz / 2],  // centre of icon = aircraft lat/lon (rotation-invariant)
+    iconAnchor: [sz / 2, sz / 2],
   });
 }
 
@@ -308,6 +308,7 @@ function drawTraffic() {
         `Hdg ${Math.round(ac.heading_deg)}° &nbsp;|&nbsp; Dist ${ac.distance_km} km`,
         { direction: "top", offset: [0, -6], className: "terrain-tip" }
       );
+      selectedAcMarker.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); });
       selectedAcMarker.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
     } else {
       // Non-selected: small dot in the traffic layer
@@ -324,6 +325,7 @@ function drawTraffic() {
         `Dist ${ac.distance_km} km`,
         { direction: "top", offset: [0, -4] }
       );
+      m.on("mousedown", (e) => { L.DomEvent.stopPropagation(e); });
       m.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
     }
   });
