@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 import asyncio
 import base64
 import httpx
+import math as _math
 import os
 import time
 import uuid
@@ -65,16 +66,21 @@ def generate_cells(state, terrain, prob, weather=None,
                    slope_grid=None, roughness_grid=None,
                    crowd_grid=None, obstacle_grid=None):
     """
-    Build a 9×9 risk grid centred on the aircraft.
+    Build a 9×9 risk grid.
 
-    Scoring pipeline (when slope/roughness grids are available):
-        AHP weights → TOPSIS relative ranking → Logistic → risk = 1 - probability
+    Two layout modes selected by state["forward_grid"]:
 
-    Falls back to the elevation-derived slope from terrain_engine when the
-    DEM grid could not be fetched (API timeout, rate-limit, etc.).
+    • False (area mode, default):
+        Grid centred on the aircraft position, north-aligned.
+        Aircraft is at the centre cell.
 
-    Output format is unchanged — the frontend receives the same cell dict
-    structure as before.
+    • True (nose-forward, active aircraft tracking):
+        Grid rotated to heading_deg.  Aircraft sits just behind row 8
+        (the last/nearest row); all 9 rows extend ahead of the nose.
+        Gives the pilot a pure "front vision" view of reachable terrain.
+
+    Scoring pipeline: AHP → TOPSIS → Logistic → risk = 1 − probability
+    Output cell dict structure is unchanged in both modes.
     """
     lat        = state["latitude"]
     lon        = state["longitude"]
@@ -84,99 +90,130 @@ def generate_cells(state, terrain, prob, weather=None,
     elevation_live = terrain.get("elevation_live", False)
     wind_ms        = float((weather or {}).get("wind_speed_kts", 5.0)) * 0.5144  # kts → m/s
 
-    # Confidence flags — set once and stamped onto every cell
     terrain_conf  = "real" if slope_grid is not None else ("approx" if elevation_live else "low")
     weather_conf  = (weather or {}).get("confidence", "low")
 
     steps = 4
-    size  = 0.01
+    size  = 0.01   # degrees per cell (≈ 1.11 km at the equator)
 
-    # ── Distance helper (flat-earth, km) ──────────────────────────────────────
-    def dist_km(i, j):
-        return ((i * size * 111.0) ** 2 + (j * size * 111.0) ** 2) ** 0.5
+    forward_grid = state.get("forward_grid", False)
+    heading_deg  = float(state.get("heading_deg", 0.0) or 0.0)
 
-    # ── Build cell list with all feature fields ───────────────────────────────
-    cells = []
-    for i in range(-steps, steps + 1):
-        for j in range(-steps, steps + 1):
-            cell_lat = lat + i * size
-            cell_lon = lon + j * size
-            gi, gj   = i + steps, j + steps   # grid indices (0–8)
-
-            corners = [
-                [cell_lat,        cell_lon],
-                [cell_lat + size, cell_lon],
-                [cell_lat + size, cell_lon + size],
-                [cell_lat,        cell_lon + size],
-            ]
-
-            if is_water:
-                # Use real GEBCO/etopo1 depth when the API responded with a
-                # negative elevation (below sea-level); otherwise depth is
-                # unknown — do not synthesise a fake value.
-                if elevation_live and elev < 0:
-                    local_depth      = abs(elev)   # real bathymetric depth (m)
-                    water_confidence = "real"
-                else:
-                    local_depth      = None        # API unavailable — depth unknown
-                    water_confidence = "unknown"
-
-                crowd_val = round(float(crowd_grid[gi, gj]), 3) if crowd_grid is not None else 0.0
-                cells.append({
-                    "corners":          corners,
-                    "is_water":         True,
-                    "depth_m":          round(local_depth, 0) if local_depth is not None else None,
-                    "water_confidence": water_confidence,
-                    "terrain_confidence": terrain_conf,
-                    "weather_confidence": weather_conf,
-                    # TOPSIS inputs
-                    "slope":     0.0,
-                    "roughness": 0.0,
-                    "distance":  dist_km(i, j),
-                    "wind":      wind_ms,
-                    "crowd":     crowd_val,
-                    "obstacle":  0.0,
-                    "surface":   1.0,   # water surface always max difficulty
-                    # placeholders — overwritten by score_cells()
-                    "risk":      0.9,
-                    "color":     "#1d4ed8",
-                })
+    # ── Shared cell builder — accepts corner list and grid indices ────────────
+    def _build_cell(corners, gi, gj, dist):
+        if is_water:
+            if elevation_live and elev < 0:
+                local_depth      = abs(elev)
+                water_confidence = "real"
             else:
-                # Per-cell slope from DEM grid when available; else base value
-                if slope_grid is not None:
-                    slope = max(0.0, float(slope_grid[gi, gj]))
-                else:
-                    slope = max(0.0, base_slope)
+                local_depth      = None
+                water_confidence = "unknown"
 
-                roughness = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
+            crowd_val = round(float(crowd_grid[gi, gj]), 3) if crowd_grid is not None else 0.0
+            return {
+                "corners":            corners,
+                "is_water":           True,
+                "depth_m":            round(local_depth, 0) if local_depth is not None else None,
+                "water_confidence":   water_confidence,
+                "terrain_confidence": terrain_conf,
+                "weather_confidence": weather_conf,
+                "slope":     0.0,
+                "roughness": 0.0,
+                "distance":  dist,
+                "wind":      wind_ms,
+                "crowd":     crowd_val,
+                "obstacle":  0.0,
+                "surface":   1.0,
+                "risk":      0.9,
+                "color":     "#1d4ed8",
+            }
+        else:
+            slope = max(0.0, float(slope_grid[gi, gj])) if slope_grid is not None else max(0.0, base_slope)
+            roughness     = float(roughness_grid[gi, gj]) if roughness_grid is not None else 0.0
+            surface_score = round(min(1.0, slope / 30.0), 3)
+            crowd_val     = round(float(crowd_grid[gi, gj]),    3) if crowd_grid    is not None else 0.0
+            obstacle_val  = round(float(obstacle_grid[gi, gj]), 3) if obstacle_grid is not None else 0.0
+            obstacle_conf = "real" if obstacle_grid is not None else "low"
+            return {
+                "corners":             corners,
+                "is_water":            False,
+                "terrain_confidence":  terrain_conf,
+                "weather_confidence":  weather_conf,
+                "obstacle_confidence": obstacle_conf,
+                "slope":     round(slope, 2),
+                "roughness": round(roughness, 2),
+                "distance":  dist,
+                "wind":      wind_ms,
+                "crowd":     crowd_val,
+                "obstacle":  obstacle_val,
+                "surface":   surface_score,
+                "risk":      0.5,
+                "color":     "#d8d62b",
+            }
 
-                # surface score: normalised slope (0° flat → 0.0; ≥30° steep → 1.0)
-                # Reuses the DEM slope already fetched — no new API call needed.
-                surface_score = round(min(1.0, slope / 30.0), 3)
+    cells = []
 
-                crowd_val    = round(float(crowd_grid[gi, gj]),    3) if crowd_grid    is not None else 0.0
-                obstacle_val = round(float(obstacle_grid[gi, gj]), 3) if obstacle_grid is not None else 0.0
+    if forward_grid:
+        # ── Nose-forward rotated grid ─────────────────────────────────────────
+        # The aircraft sits just behind row 8 (nearest row).
+        # Row 0 is the farthest ahead.  Column 4 is dead-centre of the nose.
+        # All geometry is in a body frame (fwd = ahead, lat = right-of-heading)
+        # then rotated to geographic (Δlat, Δlon).
+        heading_rad = _math.radians(heading_deg)
+        lat_rad     = _math.radians(lat)
+        m_per_lat   = 111320.0
+        m_per_lon   = 111320.0 * _math.cos(lat_rad)
+        cell_m      = size * m_per_lat          # ≈ 1113 m per cell side
 
-                obstacle_conf = "real" if obstacle_grid is not None else "low"
+        def to_geo(fwd_m, lat_m):
+            """Body (fwd ahead, lat right) → geographic offset (Δlat°, Δlon°)."""
+            dn = fwd_m * _math.cos(heading_rad) - lat_m * _math.sin(heading_rad)
+            de = fwd_m * _math.sin(heading_rad) + lat_m * _math.cos(heading_rad)
+            return dn / m_per_lat, de / m_per_lon
 
-                cells.append({
-                    "corners":   corners,
-                    "is_water":  False,
-                    "terrain_confidence":  terrain_conf,
-                    "weather_confidence":  weather_conf,
-                    "obstacle_confidence": obstacle_conf,
-                    # TOPSIS inputs
-                    "slope":     round(slope, 2),
-                    "roughness": round(roughness, 2),
-                    "distance":  dist_km(i, j),
-                    "wind":      wind_ms,
-                    "crowd":     crowd_val,
-                    "obstacle":  obstacle_val,
-                    "surface":   surface_score,
-                    # placeholders — overwritten by score_cells()
-                    "risk":      0.5,
-                    "color":     "#d8d62b",
-                })
+        for r in range(9):      # r=0 farthest ahead, r=8 nearest (closest to nose)
+            for c in range(9):  # c=0 left, c=4 centre, c=8 right
+                # Forward extent of this cell (metres ahead of aircraft)
+                fwd_near = (8 - r) * cell_m
+                fwd_far  = (9 - r) * cell_m
+                # Lateral extent (metres; negative = left of heading)
+                lat_left  = (c - 4.5) * cell_m
+                lat_right = (c - 3.5) * cell_m
+
+                # 4 corners: near-left, far-left, far-right, near-right
+                dl, dn = to_geo(fwd_near, lat_left);  c0 = [lat + dl, lon + dn]
+                dl, dn = to_geo(fwd_far,  lat_left);  c1 = [lat + dl, lon + dn]
+                dl, dn = to_geo(fwd_far,  lat_right); c2 = [lat + dl, lon + dn]
+                dl, dn = to_geo(fwd_near, lat_right); c3 = [lat + dl, lon + dn]
+
+                # DEM grid indices: approximate mapping to the north-aligned DEM
+                gi, gj = r, c
+
+                # Distance from aircraft to cell centre (km)
+                fwd_ctr_m = (8.5 - r) * cell_m
+                lat_ctr_m = (c - 4.0) * cell_m
+                dist = round(((fwd_ctr_m ** 2 + lat_ctr_m ** 2) ** 0.5) / 1000, 2)
+
+                cells.append(_build_cell([c0, c1, c2, c3], gi, gj, dist))
+
+    else:
+        # ── Area mode: north-aligned grid centred on aircraft (original) ──────
+        def dist_km(i, j):
+            return ((i * size * 111.0) ** 2 + (j * size * 111.0) ** 2) ** 0.5
+
+        for i in range(-steps, steps + 1):
+            for j in range(-steps, steps + 1):
+                cell_lat = lat + i * size
+                cell_lon = lon + j * size
+                gi, gj   = i + steps, j + steps
+
+                corners = [
+                    [cell_lat,        cell_lon],
+                    [cell_lat + size, cell_lon],
+                    [cell_lat + size, cell_lon + size],
+                    [cell_lat,        cell_lon + size],
+                ]
+                cells.append(_build_cell(corners, gi, gj, dist_km(i, j)))
 
     # ── AHP → TOPSIS → Logistic ───────────────────────────────────────────────
     cells = score_cells(cells)

@@ -1,5 +1,5 @@
 // ── Map setup: Esri satellite basemap + labels overlay ───────────────────────
-const map = L.map("map", { maxZoom: 19 }).setView([28.6139, 77.2090], 10);
+const map = L.map("map", { maxZoom: 19, rotate: true, touchRotate: false }).setView([28.6139, 77.2090], 10);
 
 // Custom pane for labels so they sit above terrain polygons (overlayPane z=400)
 // but below aircraft markers (markerPane z=600)
@@ -211,27 +211,75 @@ function trafficIcon(selected = false) {
   });
 }
 
+// ── Airplane SVG icon for the selected aircraft ───────────────────────────────
+// The SVG nose points "up" (north) at heading=0; a CSS rotate() aligns it to
+// any heading.  The outer div is a fixed square so Leaflet iconAnchor is stable
+// regardless of rotation angle.
+function airplaneIcon(headingDeg) {
+  const sz = 44;   // outer container (px) — large enough for any rotation
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="30" height="30"
+           style="transform:rotate(${headingDeg}deg);transform-origin:center;overflow:visible;
+                  filter:drop-shadow(0 0 5px rgba(128,255,219,0.85));">
+        <!-- fuselage: nose at top (y=2) for heading=0° = north -->
+        <polygon points="12,2 14.5,14 12,12.5 9.5,14"
+                 fill="#80ffdb" stroke="#062b2e" stroke-width="1.1"/>
+        <!-- wings -->
+        <polygon points="12,10 22,18 21,20 12,15 3,20 2,18"
+                 fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
+        <!-- tail stabiliser -->
+        <polygon points="12,15 13.5,22 12,21 10.5,22"
+                 fill="#80ffdb" stroke="#062b2e" stroke-width="1"/>
+      </svg>
+    </div>`,
+    iconSize:   [sz, sz],
+    iconAnchor: [sz / 2, sz / 2],
+  });
+}
+
 function drawTraffic() {
   trafficLayer.clearLayers();
+  // Remove old airplane marker — a fresh one will be created below
   if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
 
   aircraftFeed.forEach((ac) => {
     const isSel = ac.id === selectedAcId;
-    const m = L.marker([ac.latitude, ac.longitude], {
-      icon:            trafficIcon(isSel),
-      zIndexOffset:    isSel ? 2000 : 0,
-      bubblingMouseEvents: false,
-    }).addTo(trafficLayer);
 
-    m.bindTooltip(
-      `<strong>${esc(ac.callsign)}</strong><br>` +
-      `Alt ${Math.round(ac.altitude_ft)} ft<br>` +
-      `Spd ${Math.round(ac.speed_kts)} kt<br>` +
-      `Hdg ${Math.round(ac.heading_deg)}°<br>` +
-      `Dist ${ac.distance_km} km`,
-      { direction: "top", offset: [0, -4] }
-    );
-    m.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
+    if (isSel) {
+      // Selected aircraft: dedicated airplane icon placed directly on the map
+      // (not in trafficLayer) so it always sits above all other markers and
+      // persists independently of trafficLayer.clearLayers() on later ticks.
+      selectedAcMarker = L.marker([ac.latitude, ac.longitude], {
+        icon:            airplaneIcon(ac.heading_deg),
+        zIndexOffset:    3000,
+        bubblingMouseEvents: false,
+      }).addTo(map);
+      selectedAcMarker.bindTooltip(
+        `<strong>${esc(ac.callsign)}</strong><br>` +
+        `Alt ${Math.round(ac.altitude_ft)} ft &nbsp;|&nbsp; Spd ${Math.round(ac.speed_kts)} kt<br>` +
+        `Hdg ${Math.round(ac.heading_deg)}° &nbsp;|&nbsp; Dist ${ac.distance_km} km`,
+        { direction: "top", offset: [0, -6], className: "terrain-tip" }
+      );
+      selectedAcMarker.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
+    } else {
+      // Non-selected: small dot in the traffic layer
+      const m = L.marker([ac.latitude, ac.longitude], {
+        icon:            trafficIcon(false),
+        zIndexOffset:    0,
+        bubblingMouseEvents: false,
+      }).addTo(trafficLayer);
+      m.bindTooltip(
+        `<strong>${esc(ac.callsign)}</strong><br>` +
+        `Alt ${Math.round(ac.altitude_ft)} ft<br>` +
+        `Spd ${Math.round(ac.speed_kts)} kt<br>` +
+        `Hdg ${Math.round(ac.heading_deg)}°<br>` +
+        `Dist ${ac.distance_km} km`,
+        { direction: "top", offset: [0, -4] }
+      );
+      m.on("click", (e) => { L.DomEvent.stopPropagation(e); selectAircraft(ac); });
+    }
   });
 }
 
@@ -290,11 +338,14 @@ async function selectAircraft(ac) {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({
-      latitude:    ac.latitude,
-      longitude:   ac.longitude,
-      altitude_ft: ac.altitude_ft,
-      speed_kts:   ac.speed_kts,
-      heading_deg: ac.heading_deg,
+      latitude:     ac.latitude,
+      longitude:    ac.longitude,
+      altitude_ft:  ac.altitude_ft,
+      speed_kts:    ac.speed_kts,
+      heading_deg:  ac.heading_deg,
+      callsign:     ac.callsign,
+      icao24:       ac.icao24,
+      forward_grid: true,   // nose-forward rotated grid
     }),
   });
 
@@ -303,8 +354,12 @@ async function selectAircraft(ac) {
   terrainLayer.clearLayers();
   lzLayer.clearLayers();
 
-  // Zoom 10: shows ~80 km radius — risk grid readable + city/terrain context
-  map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
+  // Rotate map to aircraft heading (heading-up mode) before flyTo so the
+  // animation lands with the correct bearing already set.
+  if (map.setBearing) map.setBearing(ac.heading_deg);
+
+  // Zoom 12: tight enough to show the 9×9 risk grid clearly in nose-forward mode
+  map.flyTo([ac.latitude, ac.longitude], 12, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
 
@@ -431,11 +486,14 @@ async function fetchAircraft() {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              latitude:    selAc.latitude,
-              longitude:   selAc.longitude,
-              altitude_ft: selAc.altitude_ft,
-              speed_kts:   selAc.speed_kts,
-              heading_deg: selAc.heading_deg,
+              latitude:     selAc.latitude,
+              longitude:    selAc.longitude,
+              altitude_ft:  selAc.altitude_ft,
+              speed_kts:    selAc.speed_kts,
+              heading_deg:  selAc.heading_deg,
+              callsign:     selAc.callsign,
+              icao24:       selAc.icao24,
+              forward_grid: true,
             }),
           });
         }
@@ -755,6 +813,26 @@ function draw(data) {
       `Safe heading: ${g.safe_heading_deg ?? "--"}° &nbsp;|&nbsp; Rec. speed: ${g.recommended_speed_kts ?? "--"} kt<br>` +
       `Success: ${Math.round((p.success || 0) * 100)}% &nbsp;|&nbsp; Confidence: ${Math.round((p.confidence || 0) * 100)}%`;
   }
+
+  // ── Heading-up tracking: keep map rotated to aircraft heading ─────────────
+  // Runs every WS tick (≈1.5 s) so bearing stays current as the aircraft turns.
+  // Also pans the map to follow the aircraft when it has moved > 0.5 km.
+  if (selectedAcId) {
+    if (map.setBearing) map.setBearing(currentHdg);
+
+    // Update airplane icon rotation on the marker
+    if (selectedAcMarker) {
+      selectedAcMarker.setLatLng([_riskLat, _riskLon]);
+      selectedAcMarker.setIcon(airplaneIcon(currentHdg));
+    }
+
+    // Pan the map to follow the aircraft if it has drifted > 0.5 km from centre
+    const centre = map.getCenter();
+    const drift  = haversine(centre.lat, centre.lng, _riskLat, _riskLon);
+    if (drift > 0.5) {
+      map.panTo([_riskLat, _riskLon], { animate: true, duration: 1.0 });
+    }
+  }
 }
 
 // ── WebSocket connection ───────────────────────────────────────────────────────
@@ -979,11 +1057,20 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   _riskLat     = currentLat;   // restore risk grid to home base
   _riskLon     = currentLon;
   if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
-  // Re-centre the risk grid on home
+
+  // Restore north-up map orientation
+  if (map.setBearing) map.setBearing(0);
+
+  // Re-centre the risk grid on home; switch back to area (centred, north-aligned) grid
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ latitude: currentLat, longitude: currentLon }),
+    body:    JSON.stringify({
+      latitude:     currentLat,
+      longitude:    currentLon,
+      heading_deg:  0,
+      forward_grid: false,
+    }),
   });
   // Immediately show no-selection placeholders — don't wait for next WS tick
   document.getElementById("decisionBox").innerHTML =
