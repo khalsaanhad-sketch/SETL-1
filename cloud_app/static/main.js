@@ -46,6 +46,11 @@ let selectedAcId     = null;
 let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData            = null;
+let _voiceEnabled   = false;
+let _lastVoiceTxt   = "";
+let _lastVoiceTs    = 0;
+let _nightMode      = false;
+let _glideRangeNm   = 0;
 let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
 let _cachedOskyLocal      = [];     // local OpenSky results, persist between fetchAircraft() calls
 // Risk state — position posted to /api/live-state for risk grid calculation.
@@ -394,6 +399,9 @@ async function selectAircraft(ac) {
       callsign:     ac.callsign,
       icao24:       ac.icao24,
       forward_grid: true,   // nose-forward rotated grid
+      aircraft_type: ac.aircraft_type || "UNKN",
+      aircraft_reg:  ac.aircraft_reg  || "",
+      vs_fpm:        ac.vs_fpm || 0,
     }),
   });
 
@@ -501,6 +509,9 @@ async function fetchAircraft() {
         heading_deg: ac.track || 0,
         distance_km: haversine(currentLat, currentLon, ac.lat, ac.lon),
         source:      "adsb",
+        aircraft_type: (ac.t  || ac.aircraft_type || "").toUpperCase().slice(0,4) || "UNKN",
+        aircraft_reg:  (ac.r  || ac.aircraft_reg  || "").trim(),
+        vs_fpm:        ac.vs_fpm || ac.baro_rate   || 0,
       }));
 
     // ── Update local OpenSky cache when fresh data arrived ──
@@ -548,6 +559,9 @@ async function fetchAircraft() {
               callsign:     selAc.callsign,
               icao24:       selAc.icao24,
               forward_grid: true,
+              aircraft_type: selAc.aircraft_type || "UNKN",
+              aircraft_reg:  selAc.aircraft_reg  || "",
+              vs_fpm:        selAc.vs_fpm || 0,
             }),
           });
         }
@@ -572,6 +586,21 @@ async function fetchAircraft() {
 // ── Main draw — called on every WebSocket message ─────────────────────────────
 function draw(data) {
   latestData = data;
+
+  const vt = buildVoiceText(data);
+  if (vt) speakAlert(vt);
+  updateGlideOverlay(data);
+  updateSigmetBanner(data);
+  document.body.classList.toggle("critical-active", data.risk?.level==="CRITICAL");
+  if (data.cells) {
+    let idx = 0;
+    terrainLayer.eachLayer(layer => {
+      const cell = data.cells[idx++];
+      if (cell && cell.reachable === false) {
+        try { layer.setStyle({opacity:0.25, fillOpacity:0.1, dashArray:"5,4"}); } catch(e){}
+      }
+    });
+  }
 
   // Derive overall failure risk from probabilistic engine
   const failRisk = data.probabilistic ? data.probabilistic.failure : 0.3;
@@ -1135,6 +1164,24 @@ document.getElementById("locationSearch").addEventListener("keydown", (e) => {
 document.getElementById("trafficSearch").addEventListener("input", () => drawTrafficList());
 document.getElementById("trafficSearchBtn").addEventListener("click", () => drawTrafficList());
 
+document.getElementById("nightModeBtn").addEventListener("click", toggleNightMode);
+
+document.getElementById("voiceBtn").addEventListener("click", () => {
+  _voiceEnabled = !_voiceEnabled;
+  const btn = document.getElementById("voiceBtn");
+  btn.textContent = _voiceEnabled ? "Voice On" : "Voice Off";
+  btn.classList.toggle("voice-on",  _voiceEnabled);
+  btn.classList.toggle("voice-off", !_voiceEnabled);
+  if (_voiceEnabled) speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
+  document.getElementById("appNotice").textContent =
+    _voiceEnabled ? "Voice alerts ON." : "Voice alerts OFF.";
+});
+
+document.getElementById("analyticsBtn").addEventListener("click", showAnalytics);
+document.getElementById("closeAnalyticsBtn").addEventListener("click", () => {
+  document.getElementById("analyticsModal").style.display = "none";
+});
+
 document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   selectedAcId = null;
   _selPrevLat  = null;
@@ -1171,5 +1218,123 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   drawTrafficList();
   document.getElementById("appNotice").textContent = "Returned to area mode.";
 });
+
+// ── Voice Alert Engine (Web Speech API — zero dependencies) ──────────────
+function speakAlert(txt) {
+  if (!_voiceEnabled || !window.speechSynthesis) return;
+  const now = Date.now();
+  if (txt === _lastVoiceTxt && now - _lastVoiceTs < 14000) return;
+  _lastVoiceTxt = txt; _lastVoiceTs = now;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(txt);
+    u.rate = 0.90; u.pitch = 1.0; u.volume = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch(e) {
+    _voiceEnabled = false;
+    console.warn("Voice alert failed, disabling:", e);
+  }
+}
+
+function buildVoiceText(data) {
+  if (!data) return null;
+  const lvl     = data.risk?.level;
+  const opts    = data.options || [];
+  const primary = opts.find(o => o.type === "PRIMARY") || opts[0];
+  const reach   = data.reachability || {};
+  const sigs    = data.sigmets || [];
+  if (lvl === "CRITICAL") {
+    let msg = "Warning. Critical risk. ";
+    if (reach.green_reachable === 0) msg += "No safe zone within glide range. ";
+    if (sigs.length) msg += `SIGMET active: ${sigs[0].hazard}. `;
+    if (primary?.bearing_deg != null)
+      msg += `Best option bearing ${primary.bearing_deg} degrees`;
+    if (primary?.distance_nm)
+      msg += `, ${primary.distance_nm} nautical miles`;
+    msg += `. Success ${Math.round((primary?.success_probability||0)*100)} percent.`;
+    return msg;
+  }
+  if (lvl === "HIGH") {
+    let msg = "High risk. ";
+    if (sigs.length) msg += `SIGMET ${sigs[0].hazard} active. `;
+    msg += `Prepare for emergency landing. Heading ${data.guidance?.safe_heading_deg||"--"} degrees.`;
+    return msg;
+  }
+  return null;
+}
+
+function toggleNightMode() {
+  _nightMode = !_nightMode;
+  document.body.classList.toggle("night-mode", _nightMode);
+  document.getElementById("nightModeBtn").textContent =
+    _nightMode ? "Day Mode" : "Night Mode";
+}
+
+function updateGlideOverlay(data) {
+  const el = document.getElementById("glideOverlay");
+  const tx = document.getElementById("glideText");
+  if (!el || !data?.glide_range_nm) { if(el) el.style.display="none"; return; }
+  const r = data.reachability || {};
+  el.style.display = "block";
+  tx.textContent   =
+    `Glide ${data.glide_range_nm} nm  |  ` +
+    `Reachable ${r.reachable_cells??'--'}/81  |  ` +
+    `Safe reachable ${r.green_reachable??'--'}`;
+}
+
+async function showAnalytics() {
+  document.getElementById("analyticsModal").style.display = "flex";
+  document.getElementById("analyticsContent").innerHTML =
+    "<p style='color:#99a8c6;padding:12px'>Loading analytics...</p>";
+  try {
+    const resp = await fetch("/api/analytics");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json();
+    const a    = json.analytics || {};
+    const anoms= json.anomalies || [];
+    let h = "";
+    const row = (label, val, col) =>
+      `<div class="analytics-stat"><span>${label}</span>` +
+      `<span${col?` style="color:${col}"`:""}>${val}</span></div>`;
+    h += `<div class="analytics-section-title">Session Overview</div>`;
+    h += row("Total log records",   a.total_records||0);
+    h += row("Unique sessions",     a.unique_sessions||0);
+    h += row("Critical events",     a.critical_events||0,  "#ba2627");
+    h += row("High risk events",    a.high_events||0,       "#ff9c00");
+    h += `<div class="analytics-section-title">Decision Quality</div>`;
+    h += row("Mean success probability", ((a.mean_success_prob||0)*100).toFixed(1)+"%");
+    h += row("Mean green cells/tick",    a.mean_green_cells||0);
+    h += `<div class="analytics-section-title">System Performance</div>`;
+    h += row("Tick latency p50", (a.tick_ms_p50||0)+" ms");
+    h += row("Tick latency p95", (a.tick_ms_p95||0)+" ms");
+    h += row("Terrain live %",   (a.pct_terrain_live||0)+"%");
+    h += row("Real METAR %",     (a.pct_metar||0)+"%");
+    h += `<div class="analytics-section-title">Risk Distribution</div>`;
+    const colors = {CRITICAL:"#ba2627",HIGH:"#ff9c00",MODERATE:"#d8d62b",LOW:"#2cb64f"};
+    Object.entries(a.risk_distribution||{}).forEach(([k,v]) => h += row(k,v,colors[k]));
+    h += `<div class="analytics-section-title">Top Aircraft Types</div>`;
+    Object.entries(a.top_aircraft_types||{}).forEach(([k,v]) => h += row(k,v));
+    h += `<div class="analytics-section-title">Weather Sources</div>`;
+    Object.entries(a.wx_source_breakdown||{}).forEach(([k,v]) => h += row(k,v));
+    if (anoms.length) {
+      h += `<div class="analytics-section-title" style="color:#ff9c00">Anomalies</div>`;
+      anoms.forEach(a => { h += `<div style="color:#ff9c00;padding:4px 0">${a}</div>`; });
+    }
+    document.getElementById("analyticsContent").innerHTML = h;
+  } catch(e) {
+    document.getElementById("analyticsContent").innerHTML =
+      `<p style='color:#ba2627'>Error: ${e.message}</p>`;
+  }
+}
+
+function updateSigmetBanner(data) {
+  let el = document.getElementById("sigmetBanner");
+  if (!el) return;
+  const sigs = data?.sigmets || [];
+  if (!sigs.length) { el.style.display="none"; return; }
+  el.style.display = "block";
+  el.innerHTML = "SIGMET: " +
+    sigs.slice(0,2).map(s=>`${s.hazard} FL${s.alt_lo_ft/100|0}-FL${s.alt_hi_ft/100|0}`).join(" | ");
+}
 
 init();

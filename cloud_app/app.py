@@ -23,6 +23,18 @@ import cloud_app.services.crowd_engine as _crowd_engine
 from cloud_app.services.runway_engine import apply_runway_bonus, get_cached_runways
 import cloud_app.services.runway_engine as _runway_engine
 from cloud_app.services.log_engine import log_entry, init_log_engine
+from cloud_app.services.glide_engine import (
+    get_glide_params, compute_headwind, compute_glide_range_nm,
+    apply_glide_mask, compute_reachability_stats,
+)
+from cloud_app.services.sigmet_engine import (
+    get_active_sigmets, get_nearby_pireps, sigmet_risk_penalty,
+)
+from cloud_app.services.validation_engine import (
+    load_logs, compute_analytics, detect_log_anomalies,
+)
+
+ALGORITHM_VERSION = "AHP-TOPSIS-v2.2-glide-sigmet"
 
 app = FastAPI()
 
@@ -459,7 +471,17 @@ async def proxy_aircraft(lat: float, lon: float, radius: int = 200):
             for ac in osky_intl:
                 merged.setdefault(ac["hex"], ac)
 
-        return {"ac": list(merged.values())}
+        enriched = []
+        for ac in merged.values():
+            ac["aircraft_type"] = (ac.get("t") or ac.get("type","")).upper().strip()[:4] or "UNKN"
+            ac["aircraft_reg"]  = (ac.get("r") or "").strip()
+            baro_rate = ac.get("baro_rate") or ac.get("vert_rate") or 0
+            try:
+                ac["vs_fpm"] = int(float(baro_rate))
+            except (ValueError, TypeError):
+                ac["vs_fpm"] = 0
+            enriched.append(ac)
+        return {"ac": enriched}
 
 
 @app.get("/api/opensky-creds")
@@ -537,10 +559,9 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 )
                 slope_grid, roughness_grid, elev_grid = _dem
 
-                risk = compute_risk(state, weather)
-                prob = compute_probability(risk)
-                options = compute_options(prob)
-                alerts = compute_alerts(risk, prob, weather)
+                risk     = compute_risk(state, weather)
+                prob     = compute_probability(risk)
+                alerts   = compute_alerts(risk, prob, weather)
                 guidance = compute_guidance(state, terrain, weather)
 
                 cells = generate_cells(
@@ -553,8 +574,79 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     obstacle_grid=obstacle_grid,
                 )
 
-                # Post-TOPSIS runway proximity bonus (no-op when runways=[])
+                # Post-TOPSIS runway proximity bonus
                 cells = apply_runway_bonus(cells, runways)
+
+                # ── Glide envelope mask ──────────────────────────────────
+                _ac_type       = state.get("aircraft_type", "DEFAULT")
+                _ac_reg        = state.get("aircraft_reg", "")
+                _glide_r, _best_glide_kts, _ = get_glide_params(_ac_type)
+                _wind_kts      = weather.get("wind_speed_kts", 0.0)
+                _wind_dir      = weather.get("wind_direction_deg", 0.0)
+                _hdg           = float(state.get("heading_deg", 0.0) or 0.0)
+                _headwind      = compute_headwind(_wind_kts, _wind_dir, _hdg)
+                _glide_nm      = compute_glide_range_nm(
+                    state.get("altitude_ft", 5000),
+                    _glide_r, _headwind, _best_glide_kts
+                )
+                cells          = apply_glide_mask(
+                    cells, lat, lon,
+                    state.get("altitude_ft", 5000),
+                    _glide_r, _headwind, _best_glide_kts
+                )
+                _reach_stats   = compute_reachability_stats(cells)
+                _reach_stats["max_glide_range_nm"] = round(_glide_nm, 2)
+
+                # ── SIGMET + PIREP (parallel, non-blocking) ──────────────
+                _sigmets, _pireps = await asyncio.gather(
+                    get_active_sigmets(lat, lon, state.get("altitude_ft",5000)),
+                    get_nearby_pireps(lat, lon),
+                )
+                _sigmet_penalty = sigmet_risk_penalty(_sigmets)
+
+                if _sigmet_penalty > 0:
+                    _old_overall = risk.get("overall", 0)
+                    risk["overall"] = round(min(1.0, _old_overall + _sigmet_penalty), 3)
+                    if risk["overall"] > 0.7:   risk["level"] = "CRITICAL"
+                    elif risk["overall"] > 0.5: risk["level"] = "HIGH"
+                    elif risk["overall"] > 0.3: risk["level"] = "MODERATE"
+                    risk["sigmet_penalty"] = _sigmet_penalty
+
+                # Glide + no-safe-zone alert
+                if _reach_stats.get("green_reachable", 81) == 0 \
+                        and state.get("altitude_ft", 5000) < 18000:
+                    alerts.insert(0, {
+                        "severity": "CRITICAL",
+                        "message": (
+                            f"NO REACHABLE SAFE ZONE — glide range {round(_glide_nm,1)} nm. "
+                            f"All green cells outside glide envelope."
+                        )
+                    })
+
+                for sg in _sigmets[:2]:
+                    alerts.insert(0, {
+                        "severity": "HIGH",
+                        "message": (
+                            f"SIGMET ACTIVE: {sg['hazard']} "
+                            f"({sg.get('qualifier','')}) "
+                            f"FL{sg['alt_lo_ft']//100}–FL{sg['alt_hi_ft']//100}"
+                        )
+                    })
+
+                for pr in _pireps[:1]:
+                    hazstr = ", ".join(pr.get("hazards",[]))
+                    if "SEV" in hazstr or "EXTM" in hazstr:
+                        alerts.append({
+                            "severity": "MODERATE",
+                            "message": f"PIREP nearby: {hazstr}"
+                        })
+
+                # ── Options — after cells+glide (cell-aware) ────────────
+                options = compute_options(
+                    prob, cells=cells,
+                    aircraft_lat=lat, aircraft_lon=lon,
+                    aircraft_heading=_hdg,
+                )
 
                 result = {
                     "alerts":       alerts,
@@ -568,9 +660,12 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     # crowd_ready: False means OSM Overpass is still fetching in
                     # the background; frontend shows "Fetching…" instead of 0%.
                     "crowd_ready":   crowd_grid is not None,
-                    # runway_ready: True once OurAirports CSV is loaded or
-                    # Overpass has returned data for this position.
                     "runway_ready":  bool(runways),
+                    "glide_range_nm":  round(_glide_nm, 2),
+                    "reachability":    _reach_stats,
+                    "sigmets":         _sigmets,
+                    "pireps_count":    len(_pireps),
+                    "algorithm_version": ALGORITHM_VERSION,
                 }
 
                 # ── Pre-log derived fields ────────────────────────────────────
@@ -605,44 +700,65 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 _vis_sm   = round(_vis_m / 1609.34, 2) if _vis_m is not None else None
 
                 log_entry({
-                    # ── Position & identity ──────────────────────────────────
                     "ts":              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "session":         sid,
                     "callsign":        state.get("callsign"),
                     "icao24":          state.get("icao24"),
+                    "aircraft_type":   state.get("aircraft_type"),
+                    "aircraft_reg":    state.get("aircraft_reg"),
+                    "glide_ratio":     _glide_r,
+                    "max_glide_range_nm": round(_glide_nm, 2),
                     "lat":             lat,
                     "lon":             lon,
-                    # ── Aircraft state ───────────────────────────────────────
-                    "alt_ft":          state.get("altitude_ft"),   # fix: was "altitude"
-                    "speed_kts":       state.get("speed_kts"),     # fix: was "speed"
+                    "alt_ft":          state.get("altitude_ft"),
+                    "speed_kts":       state.get("speed_kts"),
                     "heading_deg":     state.get("heading_deg"),
                     "vs_fpm":          state.get("vs_fpm"),
-                    # ── Risk & probability ───────────────────────────────────
+                    "reachable_cells":      _reach_stats.get("reachable_cells"),
+                    "land_reachable_cells": _reach_stats.get("land_reachable"),
+                    "green_reachable_cells":_reach_stats.get("green_reachable"),
+                    "headwind_kts":         _headwind,
                     "flight_state":    risk.get("flight_state"),
-                    "risk_level":      risk.get("level"),          # fix: was "risk_level"
+                    "risk_level":      risk.get("level"),
                     "prob_success":    prob.get("success"),
-                    # ── Decision quality ─────────────────────────────────────
                     "best_cell_prob":     _best_prob,
                     "best_cell_color":    _best_color,
                     "best_cell_dist_nm":  _best_dist_nm,
+                    "best_cell_lat":   round((_best_cell["corners"][0][0]+_best_cell["corners"][2][0])/2,5) if _best_cell and _best_cell.get("corners") else None,
+                    "best_cell_lon":   round((_best_cell["corners"][0][1]+_best_cell["corners"][2][1])/2,5) if _best_cell and _best_cell.get("corners") else None,
+                    "best_cell_slope_deg":    _best_cell.get("slope") if _best_cell else None,
+                    "best_cell_elevation_m":  terrain.get("elevation_m"),
+                    "best_cell_surface_type": terrain.get("surface_type"),
+                    "best_cell_is_water":     _best_cell.get("is_water") if _best_cell else None,
                     "n_green_cells":      _n_green,
                     "n_yellow_cells":     _n_yellow,
                     "n_red_cells":        _n_red,
                     "top_option":         _top_opt,
-                    # ── Weather ──────────────────────────────────────────────
+                    "grid_mode":          "forward" if state.get("forward_grid") else "area",
+                    "algorithm_version":  ALGORITHM_VERSION,
+                    "sigmet_active":  len(_sigmets) > 0,
+                    "sigmet_count":   len(_sigmets),
+                    "sigmet_hazards": ",".join(s.get("hazard","") for s in _sigmets[:3]),
+                    "sigmet_penalty": _sigmet_penalty,
+                    "pirep_hazards_nearby": len(_pireps),
                     "wx_source":       weather.get("source"),
                     "wx_confidence":   weather.get("confidence"),
                     "wx_ceiling_ft":   weather.get("ceiling_ft"),
-                    "wx_wind_kts":     weather.get("wind_speed_kts"),   # fixed key
+                    "wx_wind_kts":     weather.get("wind_speed_kts"),
                     "wx_wind_dir_deg": weather.get("wind_direction_deg"),
+                    "wx_gust_kts":     weather.get("wind_gust_kts"),
                     "wx_visibility_sm":_vis_sm,
-                    # ── Terrain & data provenance ────────────────────────────
                     "terrain_live":    terrain.get("elevation_live"),
-                    # ── System health ────────────────────────────────────────
+                    "terrain_surface_type": terrain.get("surface_type"),
+                    "terrain_elevation_m":  terrain.get("elevation_m"),
+                    "is_over_water":      terrain.get("is_water"),
                     "tick_ms":         _tick_ms,
                     "n_runways_near":  len(runways),
                     "crowd_ready":     crowd_grid is not None,
                     "runway_ready":    bool(runways),
+                    "dem_cache_hit":      True,
+                    "crowd_cache_hit":    crowd_grid is not None,
+                    "mem_sessions_count": len(sessions),
                 })
                 await ws.send_json(result)
 
@@ -665,3 +781,17 @@ async def ws_endpoint(ws: WebSocket, sid: str):
             await ws.close()
         except Exception:
             pass
+
+
+@app.get("/api/analytics")
+def get_analytics():
+    rows      = load_logs()
+    analytics = compute_analytics(rows)
+    anomalies = detect_log_anomalies(rows)
+    return {"analytics": analytics, "anomalies": anomalies, "log_rows": len(rows)}
+
+
+@app.get("/api/log-tail")
+def get_log_tail(n: int = 50):
+    rows = load_logs()
+    return {"rows": rows[-n:], "total": len(rows)}

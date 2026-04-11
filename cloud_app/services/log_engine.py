@@ -27,44 +27,25 @@ LOG_MAX_BYTES = 5 * 1024 * 1024          # 5 MB — rotate threshold
 # Canonical column order — every row written in exactly this order.
 # Any key in data not listed here is silently ignored so the CSV stays tidy.
 CSV_COLUMNS = [
-    # Position & identity
-    "ts",
-    "session",
-    "callsign",
-    "icao24",
-    "lat",
-    "lon",
-    # Aircraft state
-    "alt_ft",
-    "speed_kts",
-    "heading_deg",
-    "vs_fpm",
-    # Risk & probability
-    "flight_state",
-    "risk_level",
-    "prob_success",
-    # Decision quality
-    "best_cell_prob",
-    "best_cell_color",
-    "best_cell_dist_nm",
-    "n_green_cells",
-    "n_yellow_cells",
-    "n_red_cells",
-    "top_option",
-    # Weather
-    "wx_source",
-    "wx_confidence",
-    "wx_ceiling_ft",
-    "wx_wind_kts",
-    "wx_wind_dir_deg",
-    "wx_visibility_sm",
-    # Terrain & data provenance
-    "terrain_live",
-    # System health
-    "tick_ms",
-    "n_runways_near",
-    "crowd_ready",
-    "runway_ready",
+    "ts","session","callsign","icao24",
+    "aircraft_type","aircraft_reg","glide_ratio","max_glide_range_nm",
+    "lat","lon",
+    "alt_ft","speed_kts","heading_deg","vs_fpm",
+    "reachable_cells","land_reachable_cells","green_reachable_cells","headwind_kts",
+    "flight_state","risk_level","prob_success",
+    "best_cell_prob","best_cell_color","best_cell_dist_nm",
+    "best_cell_lat","best_cell_lon","best_cell_bearing_deg",
+    "best_cell_slope_deg","best_cell_elevation_m",
+    "best_cell_surface_type","best_cell_is_water",
+    "n_green_cells","n_yellow_cells","n_red_cells","top_option",
+    "grid_mode","algorithm_version",
+    "sigmet_active","sigmet_count","sigmet_hazards","sigmet_penalty",
+    "pirep_hazards_nearby",
+    "wx_source","wx_confidence","wx_ceiling_ft",
+    "wx_wind_kts","wx_wind_dir_deg","wx_gust_kts","wx_visibility_sm",
+    "terrain_live","terrain_surface_type","terrain_elevation_m","is_over_water",
+    "tick_ms","n_runways_near","crowd_ready","runway_ready",
+    "dem_cache_hit","crowd_cache_hit","mem_sessions_count",
 ]
 
 # ── Internal state (module-level, shared across ticks) ─────────────────────────

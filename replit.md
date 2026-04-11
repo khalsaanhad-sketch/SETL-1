@@ -11,6 +11,7 @@ SETL is a real-time decision support system designed to assist pilots during eme
 - **Templates**: Jinja2
 - **WebSockets**: Real-time updates via `websockets` library
 - **Port**: 5000
+- **Algorithm**: AHP-TOPSIS-v2.2-glide-sigmet pipeline
 
 ## Project Structure
 
@@ -26,16 +27,38 @@ cloud_app/
     ├── guidance_engine.py  # Terrain-aware landing guidance
     ├── alert_engine.py     # Alert generation
     ├── probability_engine.py # Landing success probability
-    ├── options_engine.py   # Multi-option decision support
-    ├── terrain_engine.py   # Terrain data (OpenTopoData API + fallback)
-    └── weather_engine.py   # Weather data (Open-Meteo API)
+    ├── decision_engine.py  # AHP → TOPSIS decision pipeline
+    ├── options_engine.py   # Cell-aware multi-option decision support (bearing/distance/slope)
+    ├── terrain_engine.py   # Terrain data (OpenTopoData API + fallback), returns 3-tuple (slope, roughness, elevation)
+    ├── weather_engine.py   # Weather data (Open-Meteo + METAR: gusts, ceiling, precipitation)
+    ├── glide_engine.py     # Glide envelope reachability for 40+ aircraft types
+    ├── sigmet_engine.py    # NOAA SIGMETs + PIREPs (aviationweather.gov, no key needed)
+    ├── validation_engine.py # Retrospective analytics, log loading, anomaly detection
+    └── log_engine.py       # CSV flight logging with extended columns
 ```
 
 ## Data Sources
 
-- **Aircraft Data**: airplanes.live ADS-B API
-- **Weather Data**: Open-Meteo (free, no API key needed)
+- **Aircraft Data**: airplanes.live ADS-B API + OpenSky (with credentials)
+- **Weather Data**: Open-Meteo (free) + METAR/AVWX fallback
 - **Terrain Data**: OpenTopoData SRTM30m (with random fallback)
+- **SIGMETs/PIREPs**: NOAA aviationweather.gov (free, no API key)
+
+## API Endpoints
+
+- `GET /api/analytics` — Retrospective analytics from flight logs
+- `GET /api/log-tail?n=50` — Last N log entries
+- `GET /api/aircraft` — Enriched aircraft feed (type/reg/vs_fpm)
+- `WS /ws` — Real-time risk grid, glide mask, SIGMET/PIREP data
+
+## Frontend Features
+
+- **Night Mode**: Toggle dark cockpit-friendly theme
+- **Voice Alerts**: Web Speech API alerts for CRITICAL/HIGH risk events
+- **Glide Overlay**: Shows glide range, reachable/safe cell counts
+- **SIGMET Banner**: Fixed top banner when SIGMETs affect area
+- **Analytics Modal**: Session stats, risk distribution, decision quality, anomalies
+- **Critical Pulse**: Panel border animation on CRITICAL risk level
 
 ## Running the App
 
@@ -49,3 +72,6 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - Session state is in-memory (dictionary), not persisted
 - Deployed as VM (always-running) to support WebSocket connections
 - No API keys required — all external APIs are public/free
+- Terrain engine returns 3-tuple: `(slope_grid, roughness_grid, elev_grid)` — all callers must destructure
+- Slope threshold: 15° (aviation standard), terrain clearance floors: <200ft→0.92, <500ft→0.72, <1000ft→0.46
+- CSV log columns include glide metrics, SIGMET data, and extended aircraft fields
