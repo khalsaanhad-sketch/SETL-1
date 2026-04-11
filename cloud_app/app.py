@@ -30,6 +30,7 @@ from cloud_app.services.glide_engine import (
 from cloud_app.services.sigmet_engine import (
     get_active_sigmets, get_nearby_pireps, sigmet_risk_penalty,
 )
+from cloud_app.services.notam_engine import get_notam_advisories
 from cloud_app.services.validation_engine import (
     load_logs, compute_analytics, detect_log_anomalies,
 )
@@ -58,11 +59,22 @@ async def serve_main_js():
     )
 
 sessions = {}
+_SESSION_TTL_S = 3600
 
 init_log_engine()
 
 
+def _evict_stale_sessions():
+    now = time.monotonic()
+    stale = [k for k, v in sessions.items()
+             if now - v.get("_last_seen", now) > _SESSION_TTL_S]
+    for k in stale:
+        sessions.pop(k, None)
+
+
 def ensure_session(sid):
+    if len(sessions) > 500:
+        _evict_stale_sessions()
     if sid not in sessions:
         sessions[sid] = {
             "latitude": 28.6139,
@@ -71,6 +83,7 @@ def ensure_session(sid):
             "speed_kts": 100,
             "heading_deg": 90,
         }
+    sessions[sid]["_last_seen"] = time.monotonic()
     return sessions[sid]
 
 
@@ -501,11 +514,23 @@ def create_session():
     return {"session_id": sid}
 
 
+_FLOAT_FIELDS = {"latitude","longitude","altitude_ft","speed_kts","heading_deg","vs_fpm"}
+_STR_FIELDS   = {"callsign","icao24","aircraft_type","aircraft_reg"}
+
 @app.post("/api/live-state/{sid}")
 async def update_state(sid: str, request: Request):
     data = await request.json()
     state = ensure_session(sid)
-    state.update(data)
+    for k, v in data.items():
+        if k in _FLOAT_FIELDS:
+            try:
+                state[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+        elif k in _STR_FIELDS:
+            state[k] = str(v)[:64]
+        elif k in ("forward_grid",):
+            state[k] = v if isinstance(v, bool) else str(v).lower() not in ("false","0","no","")
     return {"ok": True}
 
 
@@ -551,11 +576,11 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     asyncio.create_task(_runway_engine.get_nearby_runways(lat, lon))
                 runways = get_cached_runways(lat, lon)
 
-                # Terrain, weather, and DEM run in parallel — none blocked by Overpass
-                terrain, weather, _dem = await asyncio.gather(
+                terrain, weather, _dem, _notams = await asyncio.gather(
                     get_terrain(lat, lon),
                     get_weather(lat, lon),
                     get_terrain_grid(lat, lon),
+                    get_notam_advisories(lat, lon),
                 )
                 slope_grid, roughness_grid, elev_grid = _dem
 
@@ -574,8 +599,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     obstacle_grid=obstacle_grid,
                 )
 
-                # Post-TOPSIS runway proximity bonus
-                cells = apply_runway_bonus(cells, runways)
+                cells = apply_runway_bonus(cells, runways, notams=_notams)
 
                 # ── Glide envelope mask ──────────────────────────────────
                 _ac_type       = state.get("aircraft_type", "DEFAULT")
@@ -592,7 +616,9 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 cells          = apply_glide_mask(
                     cells, lat, lon,
                     state.get("altitude_ft", 5000),
-                    _glide_r, _headwind, _best_glide_kts
+                    _glide_r, _headwind, _best_glide_kts,
+                    wind_speed_kts=_wind_kts,
+                    wind_dir_deg=_wind_dir,
                 )
                 _reach_stats   = compute_reachability_stats(cells)
                 _reach_stats["max_glide_range_nm"] = round(_glide_nm, 2)
@@ -666,6 +692,13 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "sigmets":         _sigmets,
                     "pireps_count":    len(_pireps),
                     "algorithm_version": ALGORITHM_VERSION,
+                    "notams":           {
+                        "closed":       list(_notams.get("closed", [])),
+                        "contaminated": list(_notams.get("contaminated", [])),
+                    },
+                    "true_altitude_ft": risk.get("true_altitude_ft"),
+                    "vs_risk":          risk.get("vs_risk", 0),
+                    "ttg_scalar":       risk.get("ttg_scalar", 1.0),
                 }
 
                 # ── Pre-log derived fields ────────────────────────────────────

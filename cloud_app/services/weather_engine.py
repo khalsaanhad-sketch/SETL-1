@@ -26,12 +26,20 @@ async def _fetch_metar(lat: float, lon: float) -> dict | None:
         if not isinstance(result, list) or not result:
             return None
 
-        # Pick nearest station by Euclidean distance in degrees
-        best = min(
-            result,
-            key=lambda s: (float(s.get("lat", lat)) - lat) ** 2
-                        + (float(s.get("lon", lon)) - lon) ** 2,
-        )
+        import math as _m
+        def _gc_dist(s):
+            try:
+                slat = float(s.get("lat", lat))
+                slon = float(s.get("lon", lon))
+                dlat = _m.radians(slat - lat)
+                dlon = _m.radians(slon - lon)
+                a = (_m.sin(dlat/2)**2 +
+                     _m.cos(_m.radians(lat)) * _m.cos(_m.radians(slat)) *
+                     _m.sin(dlon/2)**2)
+                return _m.atan2(_m.sqrt(a), _m.sqrt(1-a))
+            except Exception:
+                return float("inf")
+        best = min(result, key=_gc_dist)
 
         wind_speed_kts = round(float(best.get("wspd") or 0), 1)
         wind_gust_kts  = round(float(best.get("wgst") or wind_speed_kts), 1)
@@ -66,8 +74,15 @@ async def _fetch_metar(lat: float, lon: float) -> dict | None:
         elif any(p in wx for p in ("RA", "SN", "GR", "PL", "DZ")):
             precip_mm = 3.0 if "-" not in wx else 1.0
 
+        altim_inhg = best.get("altim")
+        try:
+            qnh_hpa = round(float(altim_inhg) * 33.8639, 1) if altim_inhg else 1013.25
+        except (ValueError, TypeError):
+            qnh_hpa = 1013.25
+
         return {
             "wind_speed_kts":     wind_speed_kts,
+            "qnh_hpa":            qnh_hpa,
             "wind_gust_kts":      wind_gust_kts,
             "wind_direction_deg": wind_dir,
             "visibility_m":       visibility_m,
@@ -105,7 +120,7 @@ async def get_weather(lat: float, lon: float) -> dict:
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
             f"&current_weather=true"
-            f"&hourly=visibility,precipitation,windgusts_10m"
+            f"&hourly=visibility,precipitation,windgusts_10m,time"
         )
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(url)
@@ -114,10 +129,17 @@ async def get_weather(lat: float, lon: float) -> dict:
         cw            = data.get("current_weather", {})
         wind_speed    = cw.get("windspeed",    0)
         wind_dir      = cw.get("winddirection", 0)
+        import datetime as _dt
         hourly        = data.get("hourly", {})
-        visibility    = hourly.get("visibility",    [10000])[0]
-        precipitation = hourly.get("precipitation", [0])[0]
-        wind_gust_kmh = hourly.get("windgusts_10m", [wind_speed])[0]
+        time_list     = hourly.get("time", [])
+        now_iso = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:00")
+        try:
+            hi = time_list.index(now_iso)
+        except (ValueError, AttributeError):
+            hi = 0
+        visibility    = hourly.get("visibility",    [10000])[hi] if hourly.get("visibility") else 10000
+        precipitation = hourly.get("precipitation", [0])[hi] if hourly.get("precipitation") else 0
+        wind_gust_kmh = hourly.get("windgusts_10m", [wind_speed])[hi] if hourly.get("windgusts_10m") else wind_speed
 
         wind_speed_kts = round(wind_speed    * 0.539957, 1)
         wind_gust_kts  = round(wind_gust_kmh * 0.539957, 1)
@@ -129,6 +151,7 @@ async def get_weather(lat: float, lon: float) -> dict:
             "visibility_m":       visibility,
             "precipitation_mm":   precipitation,
             "ceiling_ft":         None,
+            "qnh_hpa":            1013.25,
             "confidence":         "approx",
             "source":             "open-meteo",
             "station":            "",
@@ -145,6 +168,7 @@ async def get_weather(lat: float, lon: float) -> dict:
         "visibility_m":       10000,
         "precipitation_mm":   0.0,
         "ceiling_ft":         None,
+        "qnh_hpa":            1013.25,
         "confidence":         "low",
         "source":             "default",
         "station":            "",

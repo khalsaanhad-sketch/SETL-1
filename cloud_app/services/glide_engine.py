@@ -1,7 +1,7 @@
 """
 SETL Glide Envelope Engine
 Computes glide reachability for each cell based on aircraft type,
-altitude AGL, glide ratio, and headwind component.
+altitude AGL, glide ratio, and per-cell wind component.
 No external API required — pure computation.
 """
 import math
@@ -49,18 +49,19 @@ def compute_glide_range_nm(altitude_ft: float, glide_ratio: float,
 def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
                      altitude_ft: float, glide_ratio: float,
                      headwind_kts: float = 0.0,
-                     best_glide_kts: float = 150.0) -> list:
-    max_nm = compute_glide_range_nm(altitude_ft, glide_ratio,
-                                     headwind_kts, best_glide_kts)
+                     best_glide_kts: float = 150.0,
+                     wind_speed_kts: float = 0.0,
+                     wind_dir_deg: float = 0.0) -> list:
     R = 6371.0
     for cell in cells:
         c = cell.get("corners", [])
         if len(c) < 3:
-            cell["reachable"]        = True
-            cell["glide_margin_nm"]  = 99.0
+            cell["reachable"]       = True
+            cell["glide_margin_nm"] = 99.0
             continue
         clat = (c[0][0] + c[2][0]) / 2
         clon = (c[0][1] + c[2][1]) / 2
+
         dlat = math.radians(clat - ac_lat)
         dlon = math.radians(clon - ac_lon)
         a    = (math.sin(dlat/2)**2 +
@@ -68,6 +69,17 @@ def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
                 math.cos(math.radians(clat)) *
                 math.sin(dlon/2)**2)
         dist_nm = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)) / 1.852
+
+        y = math.sin(math.radians(clon - ac_lon)) * math.cos(math.radians(clat))
+        x = (math.cos(math.radians(ac_lat)) * math.sin(math.radians(clat)) -
+             math.sin(math.radians(ac_lat)) * math.cos(math.radians(clat)) *
+             math.cos(math.radians(clon - ac_lon)))
+        bearing_to_cell = (math.degrees(math.atan2(y, x)) + 360) % 360
+
+        cell_headwind = compute_headwind(wind_speed_kts, wind_dir_deg, bearing_to_cell)
+
+        max_nm = compute_glide_range_nm(altitude_ft, glide_ratio,
+                                        cell_headwind, best_glide_kts)
         margin  = round(max_nm - dist_nm, 2)
         cell["reachable"]       = dist_nm <= max_nm
         cell["glide_margin_nm"] = margin

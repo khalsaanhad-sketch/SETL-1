@@ -62,10 +62,19 @@ def compute_guidance(state: dict, terrain: dict, weather: dict | None = None) ->
             f"Maintain heading {safe_heading}°. Monitor terrain ahead."
         )
 
+    vs_fpm = float(state.get("vs_fpm", 0) or 0)
+    if vs_fpm < -2000:
+        vs_guidance = "MAYDAY: Abnormal descent rate. Declare emergency. Squawk 7700."
+    elif vs_fpm < -1000:
+        vs_guidance = "High descent rate detected. Reduce rate. Check for engine abnormality."
+    else:
+        vs_guidance = None
+
     return {
         "action":                action,
         "recommended_speed_kts": round(recommended_speed, 1),
         "safe_heading_deg":      safe_heading,
         "agl_ft":                round(agl, 0),
         "time_to_ground_min":    round(time_to_ground_min, 2),
+        "vs_guidance":           vs_guidance,
     }
