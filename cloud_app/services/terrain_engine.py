@@ -1,5 +1,18 @@
+import time
+
 import httpx
 import numpy as np
+
+# ── Single-point terrain cache (position + 2-minute TTL) ─────────────────────
+# get_terrain() makes one etopo1 HTTP call per tick with no cache — this becomes
+# a rate-limit hazard at scale.  Position key quantised to ~5 km (0.05°) so any
+# movement smaller than that reuses the cached result immediately.
+_TERRAIN_CACHE: dict = {"key": None, "ts": 0.0, "data": None}
+_TERRAIN_TTL   = 120.0   # seconds
+
+
+def _terrain_cache_key(lat: float, lon: float, q: float = 0.05) -> tuple:
+    return (round(lat / q) * q, round(lon / q) * q)
 
 
 def _ocean_estimate(lat: float, lon: float) -> float:
@@ -35,7 +48,14 @@ async def get_terrain(lat: float, lon: float) -> dict:
 
     etopo1 returns negative values for below-sea-level (ocean) positions,
     positive for land, and None for missing data.
+
+    Results are cached by ~5 km position quantisation with a 2-minute TTL
+    so the API is called at most once per 2 minutes per 5 km grid square.
     """
+    key = _terrain_cache_key(lat, lon)
+    now = time.monotonic()
+    if _TERRAIN_CACHE["key"] == key and (now - _TERRAIN_CACHE["ts"]) < _TERRAIN_TTL:
+        return _TERRAIN_CACHE["data"]
 
     elevation      = None
     elevation_live = False   # True only when etopo1 API returned a real value
@@ -89,7 +109,7 @@ async def get_terrain(lat: float, lon: float) -> dict:
         slope_deg      = 6.0
         landing_viable = False
 
-    return {
+    result = {
         "elevation_m":    round(elevation, 1),
         "slope_deg":      slope_deg,
         "surface_type":   surface_type,
@@ -97,6 +117,8 @@ async def get_terrain(lat: float, lon: float) -> dict:
         "landing_viable": landing_viable,
         "elevation_live": elevation_live,
     }
+    _TERRAIN_CACHE.update({"key": key, "ts": now, "data": result})
+    return result
 
 
 # ── Terrain grid — slope & roughness per cell ─────────────────────────────────
