@@ -576,6 +576,17 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     asyncio.create_task(_runway_engine.get_nearby_runways(lat, lon))
                 runways = get_cached_runways(lat, lon)
 
+                # ── Launch SIGMET + PIREP as tasks NOW so they fetch in
+                # parallel with terrain/weather instead of sequentially after.
+                # Results are awaited further below, after cells are built.
+                _alt_ft = state.get("altitude_ft", 5000)
+                _sigmet_task = asyncio.create_task(
+                    get_active_sigmets(lat, lon, _alt_ft)
+                )
+                _pirep_task  = asyncio.create_task(
+                    get_nearby_pireps(lat, lon)
+                )
+
                 terrain, weather, _dem, _notams = await asyncio.gather(
                     get_terrain(lat, lon),
                     get_weather(lat, lon),
@@ -623,11 +634,9 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 _reach_stats   = compute_reachability_stats(cells)
                 _reach_stats["max_glide_range_nm"] = round(_glide_nm, 2)
 
-                # ── SIGMET + PIREP (parallel, non-blocking) ──────────────
-                _sigmets, _pireps = await asyncio.gather(
-                    get_active_sigmets(lat, lon, state.get("altitude_ft",5000)),
-                    get_nearby_pireps(lat, lon),
-                )
+                # ── SIGMET + PIREP — collect results from tasks started
+                # at the top of this tick (ran in parallel with terrain/weather)
+                _sigmets, _pireps = await asyncio.gather(_sigmet_task, _pirep_task)
                 _sigmet_penalty = sigmet_risk_penalty(_sigmets)
 
                 if _sigmet_penalty > 0:
