@@ -1346,7 +1346,13 @@ document.getElementById("voiceBtn").addEventListener("click", () => {
   btn.textContent = _voiceEnabled ? "Voice On" : "Voice Off";
   btn.classList.toggle("voice-on",  _voiceEnabled);
   btn.classList.toggle("voice-off", !_voiceEnabled);
-  if (_voiceEnabled) speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
+  if (_voiceEnabled) {
+    speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
+  } else {
+    // Cancel any utterance already queued or mid-speech — setting the flag
+    // alone does not stop the Web Speech API from finishing what it started.
+    window.speechSynthesis?.cancel();
+  }
   document.getElementById("appNotice").textContent =
     _voiceEnabled ? "Voice alerts ON." : "Voice alerts OFF.";
 });
