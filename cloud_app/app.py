@@ -417,7 +417,7 @@ def _parse_opensky_states(states: list) -> tuple[list, list]:
             "lat":      s[6],
             "lon":      s[5],
             "alt_baro": round(s[7] * 3.28084) if s[7] else 0,
-            "gs":       round(s[9] * 1.944)   if s[9] else 0,
+            "gs":       round(s[9] * 1.944)   if s[9] else None,
             "track":    s[10] or 0,
         }
         if _is_indian_domestic(s):
