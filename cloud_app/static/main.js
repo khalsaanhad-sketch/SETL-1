@@ -1170,6 +1170,7 @@ async function init() {
     `<span style="color:#4a5a7a;font-size:0.85em">Flight guidance, AGL, time-to-ground and probability metrics will appear here once a flight is selected.</span>`;
 
   connectWS();
+  _autoSelectFirst = true;   // auto-select nearest aircraft on first load
   fetchAircraft();
   _acInterval = setInterval(fetchAircraft, 6000);
 }
