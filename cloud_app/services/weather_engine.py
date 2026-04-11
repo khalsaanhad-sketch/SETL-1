@@ -1,6 +1,20 @@
+import time
+
 import httpx
 
 _SM_TO_M = 1609.34   # statute miles → metres (METAR visibility unit)
+
+# ── Weather cache (position + 3-minute TTL) ───────────────────────────────────
+# get_weather() makes live METAR + Open-Meteo calls on every WS tick (no cache).
+# At scale this hammers NOAA and Open-Meteo from a single server IP.
+# Position key quantised to 0.1° (~11 km) — coarser than terrain because METAR
+# stations cover a wide area and NWP grid resolution is ~7 km anyway.
+_WEATHER_CACHE: dict = {"key": None, "ts": 0.0, "data": None}
+_WEATHER_TTL   = 180.0   # seconds
+
+
+def _weather_cache_key(lat: float, lon: float) -> tuple:
+    return (round(lat, 1), round(lon, 1))
 
 
 async def _fetch_metar(lat: float, lon: float) -> dict | None:
@@ -108,10 +122,20 @@ async def get_weather(lat: float, lon: float) -> dict:
 
     All three paths return the same keys so downstream code never needs to
     branch on the source.
+
+    Results are cached by ~11 km position quantisation (0.1°) with a 3-minute
+    TTL — METAR updates every 20–30 minutes; NWP every hour.  This eliminates
+    per-tick NOAA + Open-Meteo calls at scale without meaningful data staleness.
     """
+    key = _weather_cache_key(lat, lon)
+    now = time.monotonic()
+    if _WEATHER_CACHE["key"] == key and (now - _WEATHER_CACHE["ts"]) < _WEATHER_TTL:
+        return _WEATHER_CACHE["data"]
+
     # ── Primary: real METAR ──────────────────────────────────────────────────
     metar = await _fetch_metar(lat, lon)
     if metar:
+        _WEATHER_CACHE.update({"key": key, "ts": now, "data": metar})
         return metar
 
     # ── Fallback: Open-Meteo NWP ─────────────────────────────────────────────
@@ -144,7 +168,7 @@ async def get_weather(lat: float, lon: float) -> dict:
         wind_speed_kts = round(wind_speed    * 0.539957, 1)
         wind_gust_kts  = round(wind_gust_kmh * 0.539957, 1)
 
-        return {
+        om_result = {
             "wind_speed_kts":     wind_speed_kts,
             "wind_gust_kts":      max(wind_speed_kts, wind_gust_kts),
             "wind_direction_deg": wind_dir,
@@ -156,11 +180,15 @@ async def get_weather(lat: float, lon: float) -> dict:
             "source":             "open-meteo",
             "station":            "",
         }
+        _WEATHER_CACHE.update({"key": key, "ts": now, "data": om_result})
+        return om_result
 
     except Exception:
         pass
 
     # ── Last resort: static conservative defaults ────────────────────────────
+    # Do NOT cache the static default — it carries no positional meaning and
+    # we want to retry real APIs on the very next tick.
     return {
         "wind_speed_kts":     10.0,
         "wind_gust_kts":      10.0,
