@@ -46,9 +46,11 @@ let selectedAcId     = null;
 let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData            = null;
-let _voiceEnabled   = false;
-let _lastVoiceTxt   = "";
-let _lastVoiceTs    = 0;
+let _voiceEnabled    = false;
+let _lastVoiceTxt    = "";
+let _lastVoiceTs     = 0;
+let _lastSpokenLevel = null;   // risk level that was last spoken aloud
+let _lastSpeakTime   = 0;      // monotonic time of last speech dispatch
 let _nightMode      = false;
 let _glideRangeNm   = 0;
 let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
@@ -687,8 +689,20 @@ function draw(data) {
   latestData = data;
 
   autoManageVoice();
-  const vt = buildVoiceText(data);
-  if (vt) speakAlert(vt);
+  // Only speak on risk-level change or at most every 30 s at the same serious level.
+  // This prevents the WS tick rate (1.5 s) from queuing continuous utterances.
+  const _lvl = data.risk?.level;
+  if (_voiceEnabled && (_lvl === "CRITICAL" || _lvl === "HIGH")) {
+    const _now        = Date.now();
+    const _levelShift = _lvl !== _lastSpokenLevel;
+    const _reminder   = _now - _lastSpeakTime > 30_000;
+    if (_levelShift || _reminder) {
+      const vt = buildVoiceText(data);
+      if (vt) { speakAlert(vt); _lastSpokenLevel = _lvl; _lastSpeakTime = _now; }
+    }
+  } else if (_lvl !== "CRITICAL" && _lvl !== "HIGH") {
+    _lastSpokenLevel = null;   // reset so next escalation speaks immediately
+  }
   updateGlideOverlay(data);
   updateSigmetBanner(data);
   document.body.classList.toggle("critical-active", data.risk?.level==="CRITICAL");
@@ -1352,6 +1366,8 @@ document.getElementById("voiceBtn").addEventListener("click", () => {
     // Cancel any utterance already queued or mid-speech — setting the flag
     // alone does not stop the Web Speech API from finishing what it started.
     window.speechSynthesis?.cancel();
+    _lastSpokenLevel = null;   // reset so next voice-on speaks immediately
+    _lastSpeakTime   = 0;
   }
   document.getElementById("appNotice").textContent =
     _voiceEnabled ? "Voice alerts ON." : "Voice alerts OFF.";
@@ -1403,9 +1419,6 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
 // ── Voice Alert Engine (Web Speech API — zero dependencies) ──────────────
 function speakAlert(txt) {
   if (!_voiceEnabled || !window.speechSynthesis) return;
-  const now = Date.now();
-  if (txt === _lastVoiceTxt && now - _lastVoiceTs < 14000) return;
-  _lastVoiceTxt = txt; _lastVoiceTs = now;
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(txt);
