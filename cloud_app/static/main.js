@@ -63,6 +63,21 @@ let _selPrevLon = null;
 // When true, fetchAircraft() will auto-select the nearest aircraft after the feed loads.
 let _autoSelectFirst = false;
 
+// ── Dead reckoning state ──────────────────────────────────────────────────────
+// Between 6-second ADS-B polls, the aircraft position and altitude are projected
+// forward using the last known speed, heading, and vertical speed.
+// Altitude DR is safety-critical: a 2000 ft/min descent loses 200 ft per 6-second
+// poll cycle — enough to shift risk from MODERATE to CRITICAL undetected.
+let _drBaseLat    = null;   // lat at last real poll
+let _drBaseLon    = null;   // lon at last real poll
+let _drBaseAlt    = null;   // altitude_ft at last real poll
+let _drSpeedKts   = 0;      // ground speed at last real poll
+let _drHeadingDeg = 0;      // heading at last real poll
+let _drVsFpm      = 0;      // vertical speed (ft/min) at last real poll
+let _drBaseTime   = 0;      // Date.now() at last real poll
+let _drInterval   = null;   // 1-second DR timer handle
+let _drPostCtr    = 0;      // counter: post to backend every 2nd tick
+
 // ── Overpass-fetched context — nearest airport and road ───────────────────────
 let _nearestAirport  = null;   // { name, icao, dist_km }
 let _nearestRoad     = null;   // { type, dist_km }
@@ -309,7 +324,7 @@ function drawTraffic() {
       }).addTo(map);
       selectedAcMarker.bindTooltip(
         `<strong>${esc(ac.callsign)}</strong><br>` +
-        `Alt ${Math.round(ac.altitude_ft)} ft &nbsp;|&nbsp; Spd ${Math.round(ac.speed_kts)} kt<br>` +
+        `Alt ${Math.round(ac.altitude_ft)} ft &nbsp;|&nbsp; Spd ${ac.speed_kts != null ? Math.round(ac.speed_kts) + ' kt' : '— kt'}<br>` +
         `Hdg ${Math.round(ac.heading_deg)}° &nbsp;|&nbsp; Dist ${ac.distance_km} km`,
         { direction: "top", offset: [0, -6], className: "terrain-tip" }
       );
@@ -325,7 +340,7 @@ function drawTraffic() {
       m.bindTooltip(
         `<strong>${esc(ac.callsign)}</strong><br>` +
         `Alt ${Math.round(ac.altitude_ft)} ft<br>` +
-        `Spd ${Math.round(ac.speed_kts)} kt<br>` +
+        `Spd ${ac.speed_kts != null ? Math.round(ac.speed_kts) + ' kt' : '—'}<br>` +
         `Hdg ${Math.round(ac.heading_deg)}°<br>` +
         `Dist ${ac.distance_km} km`,
         { direction: "top", offset: [0, -4] }
@@ -365,7 +380,7 @@ function drawTrafficList() {
     row.style.cursor = "pointer";
     row.innerHTML =
       `<strong>${esc(ac.callsign)}</strong>` +
-      `<span>${Math.round(ac.altitude_ft)} ft • ${Math.round(ac.speed_kts)} kt • ${ac.distance_km} km</span>`;
+      `<span>${Math.round(ac.altitude_ft)} ft • ${ac.speed_kts != null ? Math.round(ac.speed_kts) + ' kt' : '—'} • ${ac.distance_km} km</span>`;
     row.addEventListener("click", () => selectAircraft(ac));
     list.appendChild(row);
   });
@@ -386,6 +401,10 @@ async function selectAircraft(ac) {
   _riskLon    = ac.longitude;
   _selPrevLat = ac.latitude;
   _selPrevLon = ac.longitude;
+
+  // Start dead reckoning from this aircraft's current state
+  _resetDR(ac);
+  _startDR();
 
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
@@ -479,6 +498,84 @@ async function fetchOpenSkyDirect() {
   }
 }
 
+// ── Dead reckoning engine ─────────────────────────────────────────────────────
+
+function _deadReckonLL(lat, lon, speedKts, headingDeg, seconds) {
+  // Spherical dead reckoning: project (lat,lon) forward along heading by
+  // distance = speed × time.  Returns [lat, lon] unchanged if speed is 0/null.
+  if (!speedKts || speedKts <= 0) return [lat, lon];
+  const dist_m = speedKts * 0.514444 * seconds;
+  const R      = 6371000;
+  const δ      = dist_m / R;
+  const θ      = Math.PI / 180 * headingDeg;
+  const φ1     = Math.PI / 180 * lat;
+  const λ1     = Math.PI / 180 * lon;
+  const φ2     = Math.asin(
+    Math.sin(φ1) * Math.cos(δ) +
+    Math.cos(φ1) * Math.sin(δ) * Math.cos(θ)
+  );
+  const λ2     = λ1 + Math.atan2(
+    Math.sin(θ) * Math.sin(δ) * Math.cos(φ1),
+    Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2)
+  );
+  return [φ2 * 180 / Math.PI, λ2 * 180 / Math.PI];
+}
+
+function _resetDR(ac) {
+  // Snapshot the aircraft state from the latest real ADS-B poll.
+  _drBaseLat    = ac.latitude;
+  _drBaseLon    = ac.longitude;
+  _drBaseAlt    = ac.altitude_ft ?? 5000;
+  _drSpeedKts   = ac.speed_kts  ?? 0;
+  _drHeadingDeg = ac.heading_deg ?? 0;
+  _drVsFpm      = ac.vs_fpm     ?? 0;
+  _drBaseTime   = Date.now();
+  _drPostCtr    = 0;
+}
+
+function _stopDR() {
+  if (_drInterval) { clearInterval(_drInterval); _drInterval = null; }
+}
+
+function _startDR() {
+  _stopDR();
+  _drInterval = setInterval(() => {
+    if (!selectedAcId || _drBaseLat == null) return;
+    const elapsed = (Date.now() - _drBaseTime) / 1000;   // seconds since last real poll
+
+    // Project position
+    const [drLat, drLon] = _deadReckonLL(
+      _drBaseLat, _drBaseLon, _drSpeedKts, _drHeadingDeg, elapsed
+    );
+
+    // Project altitude — clamp to ground
+    const drAlt = Math.max(0, _drBaseAlt + (_drVsFpm / 60) * elapsed);
+
+    // Smooth visual update (every 1 s) — no API call, just move the SVG icon
+    if (selectedAcMarker) selectedAcMarker.setLatLng([drLat, drLon]);
+
+    // Post dead-reckoned state to backend every 2 s so the WS risk engine
+    // computes against the estimated current altitude, not 6-second-old data.
+    // This is critical for descending aircraft: a 2000 ft/min descent loses
+    // 200 ft per poll cycle — enough to change risk level without DR.
+    _drPostCtr++;
+    if (_drPostCtr % 2 === 0 && sessionId) {
+      fetch(`/api/live-state/${sessionId}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          latitude:    drLat,
+          longitude:   drLon,
+          altitude_ft: drAlt,
+          vs_fpm:      _drVsFpm,
+          speed_kts:   _drSpeedKts,
+          heading_deg: _drHeadingDeg,
+        }),
+      }).catch(() => {});   // best-effort — silent on transient error
+    }
+  }, 1000);
+}
+
 // ── Fetch aircraft: backend proxy + browser-direct OpenSky ────────────────────
 let _fetchAcInProgress = false;
 
@@ -505,7 +602,7 @@ async function fetchAircraft() {
         latitude:    ac.lat,
         longitude:   ac.lon,
         altitude_ft: ac.alt_baro || 0,
-        speed_kts:   ac.gs || 0,
+        speed_kts:   ac.gs ?? null,
         heading_deg: ac.track || 0,
         distance_km: haversine(currentLat, currentLon, ac.lat, ac.lon),
         source:      "adsb",
@@ -543,6 +640,8 @@ async function fetchAircraft() {
           _selPrevLon = selAc.longitude;
           _riskLat    = selAc.latitude;
           _riskLon    = selAc.longitude;
+          // Reset DR base to the fresh real position so projections stay accurate
+          _resetDR(selAc);
           currentAlt  = selAc.altitude_ft;
           currentSpd  = selAc.speed_kts;
           currentHdg  = selAc.heading_deg;
@@ -1095,6 +1194,7 @@ async function searchLocation(query) {
     selectedAcId     = null;
     _selPrevLat      = null;
     _selPrevLon      = null;
+    _stopDR();
     _riskLat         = lat;
     _riskLon         = lon;
     // Reset Overpass context so new location gets fresh lookups
@@ -1215,6 +1315,7 @@ if (_demoBtnEl) _demoBtnEl.addEventListener("click", async () => {
   _riskLat    = lat;  _riskLon    = lon;
   _selPrevLat = null; _selPrevLon = null;
   selectedAcId = null;
+  _stopDR();
   _cachedOskyLocal = []; _oskyLastCall = 0;
   await fetch(`/api/live-state/${sessionId}`, {
     method:  "POST",
@@ -1259,6 +1360,7 @@ document.getElementById("clearTrackBtn").addEventListener("click", async () => {
   selectedAcId = null;
   _selPrevLat  = null;
   _selPrevLon  = null;
+  _stopDR();
   _riskLat     = currentLat;   // restore risk grid to home base
   _riskLon     = currentLon;
   if (selectedAcMarker) { map.removeLayer(selectedAcMarker); selectedAcMarker = null; }
