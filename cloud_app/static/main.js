@@ -414,8 +414,8 @@ async function selectAircraft(ac) {
   // animation lands with the correct bearing already set.
   setMapBearing(ac.heading_deg);
 
-  // Zoom 10: consistent with initial load and location search
-  map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
+  // Zoom 11: better cell + SVG readability when aircraft is selected
+  map.flyTo([ac.latitude, ac.longitude], 11, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
 
@@ -1084,7 +1084,7 @@ async function searchLocation(query) {
                   ? firstName + " Airport"
                   : firstName;
 
-    map.flyTo([lat, lon], 10, { animate: true, duration: 0.8 });
+    map.flyTo([lat, lon], 11, { animate: true, duration: 0.8 });
     currentLat = lat;
     currentLon = lon;
 
