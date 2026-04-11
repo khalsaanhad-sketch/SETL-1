@@ -1,0 +1,1083 @@
+You are working on SETL — a Python/FastAPI aviation EFB. Project root contains:
+  cloud_app/app.py
+  cloud_app/templates/index.html
+  cloud_app/static/main.js
+  cloud_app/static/styles.css
+  cloud_app/services/  (risk_engine, decision_engine, terrain_engine,
+                        weather_engine, runway_engine, crowd_engine,
+                        guidance_engine, alert_engine, probability_engine,
+                        options_engine, log_engine)
+  logs/flight_logs.csv
+  requirements.txt
+
+Execute every task below in order. Do not change AHP weights, TOPSIS logic, or
+WebSocket session structure. If one task fails, continue with the rest.
+
+════════════════════════════════════════════════════════════
+TASK 1 — CREATE cloud_app/services/glide_engine.py  (NEW FILE)
+════════════════════════════════════════════════════════════
+
+"""
+SETL Glide Envelope Engine
+Computes glide reachability for each cell based on aircraft type,
+altitude AGL, glide ratio, and headwind component.
+No external API required — pure computation.
+"""
+import math
+
+# ICAO type code → (glide_ratio, best_glide_kts, stall_kts)
+GLIDE_DB = {
+    "C172":(9.0,65,40),  "C182":(9.5,70,42),  "C208":(10.0,95,60),
+    "PA28":(9.0,63,40),  "PA44":(9.5,80,55),  "C152":(8.5,60,35),
+    "C25A":(14.0,160,85),"C25B":(14.5,165,88),"C25C":(15.0,170,90),
+    "C56X":(15.0,185,95),"C680":(15.0,185,95),
+    "B190":(12.0,120,70),"DH8A":(13.0,130,75),"DH8D":(14.0,145,78),
+    "AT72":(15.0,140,80),"E120":(12.0,120,68),"SF34":(13.0,125,72),
+    "B737":(17.0,210,120),"B738":(17.0,215,122),"B739":(17.2,218,124),
+    "B38M":(17.3,215,122),"B39M":(17.3,218,124),
+    "A318":(17.5,210,115),"A319":(17.5,215,118),"A320":(17.5,215,118),
+    "A20N":(17.5,215,118),"A321":(17.3,220,122),"A21N":(17.3,220,122),
+    "E170":(15.5,185,100),"E175":(16.0,190,105),"E190":(16.5,200,108),
+    "CRJ2":(15.5,185,100),"CRJ7":(15.8,188,102),"CRJ9":(16.0,192,105),
+    "B744":(17.5,255,145),"B748":(18.0,260,150),
+    "B772":(19.0,250,140),"B77W":(19.0,250,140),"B77L":(19.0,250,140),
+    "B788":(20.0,245,135),"B789":(20.0,245,135),"B78X":(20.0,248,137),
+    "A332":(18.5,245,132),"A333":(18.5,245,132),
+    "A343":(18.0,248,132),"A345":(18.0,250,134),"A346":(18.0,252,135),
+    "A359":(19.5,248,130),"A35K":(19.5,250,132),
+    "A388":(17.5,265,155),"A380":(17.5,265,155),
+    "DEFAULT":(12.0,150,80),
+}
+
+def get_glide_params(aircraft_type: str) -> tuple:
+    key = (aircraft_type or "").upper().strip()[:4]
+    return GLIDE_DB.get(key, GLIDE_DB["DEFAULT"])
+
+def compute_headwind(wind_speed_kts: float, wind_dir_deg: float,
+                     heading_deg: float) -> float:
+    angle = math.radians((wind_dir_deg - heading_deg + 180) % 360 - 180)
+    return round(wind_speed_kts * math.cos(angle), 1)
+
+def compute_glide_range_nm(altitude_ft: float, glide_ratio: float,
+                            headwind_kts: float = 0.0,
+                            best_glide_kts: float = 150.0) -> float:
+    alt_nm      = max(0, altitude_ft) / 6076.12
+    base_range  = alt_nm * glide_ratio
+    wind_factor = max(0.4, (best_glide_kts - headwind_kts) / best_glide_kts)
+    return round(base_range * wind_factor, 2)
+
+def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
+                     altitude_ft: float, glide_ratio: float,
+                     headwind_kts: float = 0.0,
+                     best_glide_kts: float = 150.0) -> list:
+    max_nm = compute_glide_range_nm(altitude_ft, glide_ratio,
+                                     headwind_kts, best_glide_kts)
+    R = 6371.0
+    for cell in cells:
+        c = cell.get("corners", [])
+        if len(c) < 3:
+            cell["reachable"]        = True
+            cell["glide_margin_nm"]  = 99.0
+            continue
+        clat = (c[0][0] + c[2][0]) / 2
+        clon = (c[0][1] + c[2][1]) / 2
+        dlat = math.radians(clat - ac_lat)
+        dlon = math.radians(clon - ac_lon)
+        a    = (math.sin(dlat/2)**2 +
+                math.cos(math.radians(ac_lat)) *
+                math.cos(math.radians(clat)) *
+                math.sin(dlon/2)**2)
+        dist_nm = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)) / 1.852
+        margin  = round(max_nm - dist_nm, 2)
+        cell["reachable"]       = dist_nm <= max_nm
+        cell["glide_margin_nm"] = margin
+    return cells
+
+def compute_reachability_stats(cells: list) -> dict:
+    reachable      = [c for c in cells if c.get("reachable", True)]
+    land_reachable = [c for c in reachable if not c.get("is_water", False)]
+    green_reachable= [c for c in land_reachable if c.get("probability",0)>=0.60]
+    c = cells[0] if cells else {}
+    nm = compute_glide_range_nm(0, 12)  # placeholder — overwritten by caller
+    return {
+        "total_cells":      len(cells),
+        "reachable_cells":  len(reachable),
+        "land_reachable":   len(land_reachable),
+        "green_reachable":  len(green_reachable),
+    }
+
+
+════════════════════════════════════════════════════════════
+TASK 2 — CREATE cloud_app/services/sigmet_engine.py  (NEW FILE — FREE API)
+════════════════════════════════════════════════════════════
+
+"""
+SETL SIGMET + PIREP Engine
+APIs: aviationweather.gov (same NOAA host as existing METAR — no key needed)
+  SIGMETs: https://aviationweather.gov/api/data/sigmet?format=json
+  PIREPs:  https://aviationweather.gov/api/data/pirep?format=json&distance=200&lat={}&lon={}&age=2
+"""
+import httpx
+import math
+
+_SIGMET_URL = "https://aviationweather.gov/api/data/sigmet?format=json"
+_PIREP_URL  = "https://aviationweather.gov/api/data/pirep?format=json&distance=200&age=2&lat={lat}&lon={lon}"
+
+# Module-level cache — SIGMETs valid globally, refresh every 5 min
+_SIGMET_CACHE: dict = {"ts": 0.0, "sigmets": []}
+_PIREP_CACHE:  dict = {"key": None, "pireps": []}
+
+import time as _time
+
+def _point_in_polygon(lat: float, lon: float, coords: list) -> bool:
+    """Ray-casting algorithm. coords is list of [lon, lat] pairs."""
+    n, inside = len(coords), False
+    j = n - 1
+    for i in range(n):
+        xi, yi = coords[i][0], coords[i][1]
+        xj, yj = coords[j][0], coords[j][1]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj-xi)*(lat-yi)/(yj-yi+1e-9)+xi):
+            inside = not inside
+        j = i
+    return inside
+
+async def get_active_sigmets(lat: float, lon: float,
+                              altitude_ft: float = 5000) -> list:
+    """Return list of active SIGMETs affecting the aircraft position."""
+    import time
+    now = time.monotonic()
+    if now - _SIGMET_CACHE["ts"] < 300:
+        sigmets = _SIGMET_CACHE["sigmets"]
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp    = await client.get(_SIGMET_URL,
+                                           headers={"User-Agent":"SETL-EFB/1.0"})
+                data    = resp.json()
+                sigmets = data if isinstance(data, list) else []
+                _SIGMET_CACHE.update({"ts": now, "sigmets": sigmets})
+        except Exception:
+            sigmets = _SIGMET_CACHE.get("sigmets", [])
+
+    active = []
+    for s in sigmets:
+        try:
+            alt_lo = float(s.get("altLow1") or 0) * 100
+            alt_hi = float(s.get("altHi1")  or 99999) * 100
+            if not (alt_lo <= altitude_ft <= alt_hi):
+                continue
+            coords = s.get("coords") or []
+            if coords and _point_in_polygon(lat, lon, coords):
+                active.append({
+                    "hazard":    s.get("hazard", "UNKNOWN"),
+                    "qualifier": s.get("qualifier",""),
+                    "alt_lo_ft": int(alt_lo),
+                    "alt_hi_ft": int(alt_hi),
+                    "series":    s.get("seriesId",""),
+                })
+        except Exception:
+            continue
+    return active
+
+def _pirep_cache_key(lat: float, lon: float) -> str:
+    return f"{round(lat,1)},{round(lon,1)}"
+
+async def get_nearby_pireps(lat: float, lon: float) -> list:
+    """Return recent PIREPs within 200 nm. Cached by ~0.1° position."""
+    key = _pirep_cache_key(lat, lon)
+    if _PIREP_CACHE["key"] == key:
+        return _PIREP_CACHE["pireps"]
+    try:
+        url = _PIREP_URL.format(lat=round(lat,4), lon=round(lon,4))
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(url, headers={"User-Agent":"SETL-EFB/1.0"})
+            data = resp.json()
+            pireps = data if isinstance(data, list) else []
+        # Extract relevant hazards
+        relevant = []
+        for p in pireps[:10]:
+            hazards = []
+            if p.get("icg"):  hazards.append(f"ICE:{p['icg']}")
+            if p.get("turb"): hazards.append(f"TURB:{p['turb']}")
+            if p.get("wx"):   hazards.append(f"WX:{p['wx']}")
+            if hazards:
+                relevant.append({
+                    "lat":     p.get("lat"),
+                    "lon":     p.get("lon"),
+                    "alt_ft":  (p.get("altLo") or 0) * 100,
+                    "hazards": hazards,
+                    "raw":     p.get("rawOb","")[:80],
+                })
+        _PIREP_CACHE.update({"key": key, "pireps": relevant})
+        return relevant
+    except Exception:
+        _PIREP_CACHE.update({"key": key, "pireps": []})
+        return []
+
+def sigmet_risk_penalty(sigmets: list) -> float:
+    """Return additive risk penalty [0, 0.30] from active SIGMETs."""
+    if not sigmets:
+        return 0.0
+    penalty = 0.0
+    for s in sigmets:
+        h = (s.get("hazard","") or "").upper()
+        q = (s.get("qualifier","") or "").upper()
+        if "TS" in h or "CONVECTIVE" in h:
+            penalty += 0.20
+        elif "ICE" in h or "ICING" in h:
+            penalty += 0.12 if "SEV" in q else 0.07
+        elif "TURB" in h:
+            penalty += 0.10 if "SEV" in q else 0.05
+        elif "VA" in h:  # volcanic ash
+            penalty += 0.25
+    return round(min(0.30, penalty), 3)
+
+
+════════════════════════════════════════════════════════════
+TASK 3 — CREATE cloud_app/services/validation_engine.py  (NEW FILE)
+════════════════════════════════════════════════════════════
+
+"""
+SETL Validation Engine — Retrospective analytics from flight logs.
+No external API — reads local CSV only.
+"""
+import csv, math
+from pathlib import Path
+from collections import defaultdict
+
+LOG_FILE = Path("logs/flight_logs.csv")
+
+def load_logs() -> list:
+    if not LOG_FILE.exists():
+        return []
+    try:
+        with LOG_FILE.open(encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+def compute_analytics(rows: list) -> dict:
+    if not rows:
+        return {"total_records": 0}
+    total = len(rows)
+    risk_dist, wx_src = defaultdict(int), defaultdict(int)
+    ticks, probs, greens = [], [], []
+    sessions, types = set(), defaultdict(int)
+    for r in rows:
+        risk_dist[r.get("risk_level","?")] += 1
+        wx_src[r.get("wx_source","?")] += 1
+        sessions.add(r.get("session",""))
+        types[r.get("aircraft_type","UNKNOWN")] += 1
+        try: ticks.append(int(r.get("tick_ms",0) or 0))
+        except: pass
+        try: probs.append(float(r.get("prob_success",0) or 0))
+        except: pass
+        try: greens.append(int(r.get("n_green_cells",0) or 0))
+        except: pass
+    def pct(lst, p):
+        s = sorted(lst)
+        return s[min(int(len(s)*p/100), len(s)-1)] if s else 0
+    return {
+        "total_records":      total,
+        "unique_sessions":    len(sessions),
+        "risk_distribution":  dict(risk_dist),
+        "wx_source_breakdown":dict(wx_src),
+        "top_aircraft_types": dict(sorted(types.items(),key=lambda x:-x[1])[:8]),
+        "tick_ms_p50":        pct(ticks, 50),
+        "tick_ms_p95":        pct(ticks, 95),
+        "mean_success_prob":  round(sum(probs)/len(probs),3) if probs else 0,
+        "mean_green_cells":   round(sum(greens)/len(greens),1) if greens else 0,
+        "pct_terrain_live":   round(sum(1 for r in rows if r.get("terrain_live")=="True")/total*100,1),
+        "pct_metar":          round(wx_src.get("metar",0)/total*100,1),
+        "critical_events":    risk_dist.get("CRITICAL",0),
+        "high_events":        risk_dist.get("HIGH",0),
+    }
+
+def detect_log_anomalies(rows: list, window: int = 15) -> list:
+    recent = rows[-window:] if len(rows) >= window else rows
+    flags  = []
+    try:
+        slow     = sum(1 for r in recent if int(r.get("tick_ms",0) or 0) > 5000)
+        no_dem   = sum(1 for r in recent if r.get("terrain_live") == "False")
+        no_green = sum(1 for r in recent if r.get("n_green_cells") == "0")
+        if slow     > 2:  flags.append(f"HIGH_LATENCY: {slow}/{len(recent)} ticks >5s")
+        if no_dem   > 3:  flags.append(f"DEM_API_DOWN: {no_dem}/{len(recent)} ticks no live terrain")
+        if no_green > 5:  flags.append(f"NO_SAFE_LZ: {no_green}/{len(recent)} ticks zero green cells")
+    except Exception:
+        pass
+    return flags
+
+
+════════════════════════════════════════════════════════════
+TASK 4 — FULLY REPLACE cloud_app/services/options_engine.py
+════════════════════════════════════════════════════════════
+
+Replace the ENTIRE file with:
+
+import math
+
+def _haversine_nm(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)) / 1.852
+
+def _bearing(lat1, lon1, lat2, lon2):
+    la1, la2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2-lon1)
+    x  = math.sin(dl)*math.cos(la2)
+    y  = math.cos(la1)*math.sin(la2) - math.sin(la1)*math.cos(la2)*math.cos(dl)
+    return round((math.degrees(math.atan2(x,y))+360)%360, 1)
+
+def _centre(cell):
+    c = cell.get("corners",[])
+    return ((c[0][0]+c[2][0])/2, (c[0][1]+c[2][1])/2) if len(c)>=3 else (None,None)
+
+def compute_options(prob: dict, cells: list = None,
+                    aircraft_lat: float = 0.0, aircraft_lon: float = 0.0,
+                    aircraft_heading: float = 0.0) -> list:
+    success = prob.get("success", 0.5)
+
+    if not cells:
+        return [
+            {"type":"PRIMARY",   "description":"Straight-ahead emergency landing",
+             "success_probability":round(success*0.95,3),"recommended":success>0.5,
+             "bearing_deg":None,"distance_nm":None,"cell_lat":None,"cell_lon":None,
+             "slope_deg":None,"reachable":None},
+            {"type":"SECONDARY", "description":"Turn 30° right and descend",
+             "success_probability":round(success*0.80,3),"recommended":0.3<success<=0.5,
+             "bearing_deg":None,"distance_nm":None,"cell_lat":None,"cell_lon":None,
+             "slope_deg":None,"reachable":None},
+            {"type":"EMERGENCY", "description":"Immediate forced landing — best available",
+             "success_probability":round(success*0.60,3),"recommended":success<=0.3,
+             "bearing_deg":None,"distance_nm":None,"cell_lat":None,"cell_lon":None,
+             "slope_deg":None,"reachable":None},
+        ]
+
+    land   = [c for c in cells if not c.get("is_water",False)]
+    reach  = [c for c in land  if c.get("reachable",True)]
+    pool   = reach if reach else land
+
+    if not pool:
+        water  = sorted(cells, key=lambda c: c.get("probability",0), reverse=True)
+        best   = water[0] if water else {}
+        blat,blon = _centre(best)
+        brng   = _bearing(aircraft_lat,aircraft_lon,blat,blon) if blat else None
+        dist   = round(_haversine_nm(aircraft_lat,aircraft_lon,blat,blon),2) if blat else None
+        return [{"type":"DITCHING",
+                 "description":"Controlled water ditching — gear up, flaps full",
+                 "success_probability":round(best.get("probability",0.2),3),
+                 "recommended":True,"bearing_deg":brng,"distance_nm":dist,
+                 "cell_lat":round(blat,5) if blat else None,
+                 "cell_lon":round(blon,5) if blon else None,
+                 "slope_deg":0.0,"reachable":False}]
+
+    ranked = sorted(pool, key=lambda c: c.get("probability",0), reverse=True)
+    labels = [("PRIMARY","Best LZ — highest safety score"),
+              ("SECONDARY","Alternative LZ — second best"),
+              ("EMERGENCY","Emergency LZ — minimum safe zone")]
+    options = []
+    for i,(otype,base) in enumerate(labels):
+        if i >= len(ranked): break
+        cell = ranked[i]
+        clat,clon = _centre(cell)
+        p     = cell.get("probability",0)
+        brng  = _bearing(aircraft_lat,aircraft_lon,clat,clon) if clat else None
+        dist  = round(_haversine_nm(aircraft_lat,aircraft_lon,clat,clon),2) if clat else None
+        slope = cell.get("slope",0)
+        crowd = cell.get("crowd",0)
+        desc  = base
+        if brng  is not None: desc += f". Turn {brng}°"
+        if dist  is not None: desc += f", {dist} nm"
+        if slope: desc += f". Slope {slope}°"
+        if crowd > 0.4: desc += ". ⚠ Dense area"
+        if not cell.get("reachable",True): desc += " ⚠ outside glide range"
+        options.append({
+            "type":otype,"description":desc,
+            "success_probability":round(p,3),
+            "recommended":i==0,
+            "bearing_deg":brng,"distance_nm":dist,
+            "cell_lat":round(clat,5) if clat else None,
+            "cell_lon":round(clon,5) if clon else None,
+            "slope_deg":round(slope,1),"crowd_score":round(crowd,2),
+            "reachable":cell.get("reachable",True),
+        })
+    return options
+
+
+════════════════════════════════════════════════════════════
+TASK 5 — REPLACE CSV_COLUMNS list in cloud_app/services/log_engine.py
+════════════════════════════════════════════════════════════
+
+FIND the line:  CSV_COLUMNS = [
+Find the ENTIRE list (everything from that line until the matching closing bracket ])
+REPLACE the entire CSV_COLUMNS list with:
+
+CSV_COLUMNS = [
+    "ts","session","callsign","icao24",
+    "aircraft_type","aircraft_reg","glide_ratio","max_glide_range_nm",
+    "lat","lon",
+    "alt_ft","speed_kts","heading_deg","vs_fpm",
+    "reachable_cells","land_reachable_cells","green_reachable_cells","headwind_kts",
+    "flight_state","risk_level","prob_success",
+    "best_cell_prob","best_cell_color","best_cell_dist_nm",
+    "best_cell_lat","best_cell_lon","best_cell_bearing_deg",
+    "best_cell_slope_deg","best_cell_elevation_m",
+    "best_cell_surface_type","best_cell_is_water",
+    "n_green_cells","n_yellow_cells","n_red_cells","top_option",
+    "grid_mode","algorithm_version",
+    "sigmet_active","sigmet_count","sigmet_hazards","sigmet_penalty",
+    "pirep_hazards_nearby",
+    "wx_source","wx_confidence","wx_ceiling_ft",
+    "wx_wind_kts","wx_wind_dir_deg","wx_gust_kts","wx_visibility_sm",
+    "terrain_live","terrain_surface_type","terrain_elevation_m","is_over_water",
+    "tick_ms","n_runways_near","crowd_ready","runway_ready",
+    "dem_cache_hit","crowd_cache_hit","mem_sessions_count",
+]
+
+
+════════════════════════════════════════════════════════════
+TASK 6 — UPDATE cloud_app/app.py
+════════════════════════════════════════════════════════════
+
+── 6a. ADD imports at the top of app.py, after the existing service imports ──
+
+Add these lines immediately after the line:
+  from cloud_app.services.log_engine import log_entry, init_log_engine
+
+ADD:
+from cloud_app.services.glide_engine import (
+    get_glide_params, compute_headwind, compute_glide_range_nm,
+    apply_glide_mask, compute_reachability_stats,
+)
+from cloud_app.services.sigmet_engine import (
+    get_active_sigmets, get_nearby_pireps, sigmet_risk_penalty,
+)
+from cloud_app.services.validation_engine import (
+    load_logs, compute_analytics, detect_log_anomalies,
+)
+import math as _math2
+
+ALGORITHM_VERSION = "AHP-TOPSIS-v2.2-glide-sigmet"
+
+── 6b. ADD aircraft_type extraction to the /api/aircraft endpoint ──
+
+In the proxy_aircraft function, FIND:
+  return {"ac": list(merged.values())}
+
+REPLACE with:
+  # Enrich each aircraft with type code and vertical speed from raw ADS-B fields
+  enriched = []
+  for ac in merged.values():
+      ac["aircraft_type"] = (ac.get("t") or ac.get("type","")).upper().strip()[:4] or "UNKN"
+      ac["aircraft_reg"]  = (ac.get("r") or "").strip()
+      # baro_rate is ft/min vertical speed in airplanes.live / adsb.lol feeds
+      baro_rate = ac.get("baro_rate") or ac.get("vert_rate") or 0
+      try:
+          ac["vs_fpm"] = int(float(baro_rate))
+      except (ValueError, TypeError):
+          ac["vs_fpm"] = 0
+      enriched.append(ac)
+  return {"ac": enriched}
+
+── 6c. CRITICAL FIX — move options AFTER cells, add glide + SIGMET ──
+
+FIND this EXACT block (lines 542–558 approximately):
+
+                risk = compute_risk(state, weather)
+                prob = compute_probability(risk)
+                options = compute_options(prob)
+                alerts = compute_alerts(risk, prob, weather)
+                guidance = compute_guidance(state, terrain, weather)
+
+                cells = generate_cells(
+                    state, terrain, prob["success"],
+                    weather=weather,
+                    slope_grid=slope_grid,
+                    roughness_grid=roughness_grid,
+                    elev_grid=elev_grid,
+                    crowd_grid=crowd_grid,
+                    obstacle_grid=obstacle_grid,
+                )
+
+                # Post-TOPSIS runway proximity bonus (no-op when runways=[])
+                cells = apply_runway_bonus(cells, runways)
+
+                result = {
+
+REPLACE the ENTIRE block above with:
+
+                risk     = compute_risk(state, weather)
+                prob     = compute_probability(risk)
+                alerts   = compute_alerts(risk, prob, weather)
+                guidance = compute_guidance(state, terrain, weather)
+
+                cells = generate_cells(
+                    state, terrain, prob["success"],
+                    weather=weather,
+                    slope_grid=slope_grid,
+                    roughness_grid=roughness_grid,
+                    elev_grid=elev_grid,
+                    crowd_grid=crowd_grid,
+                    obstacle_grid=obstacle_grid,
+                )
+
+                # Post-TOPSIS runway proximity bonus
+                cells = apply_runway_bonus(cells, runways)
+
+                # ── Glide envelope mask ──────────────────────────────────
+                _ac_type       = state.get("aircraft_type", "DEFAULT")
+                _ac_reg        = state.get("aircraft_reg", "")
+                _glide_r, _best_glide_kts, _ = get_glide_params(_ac_type)
+                _wind_kts      = weather.get("wind_speed_kts", 0.0)
+                _wind_dir      = weather.get("wind_direction_deg", 0.0)
+                _hdg           = float(state.get("heading_deg", 0.0) or 0.0)
+                _headwind      = compute_headwind(_wind_kts, _wind_dir, _hdg)
+                _glide_nm      = compute_glide_range_nm(
+                    state.get("altitude_ft", 5000),
+                    _glide_r, _headwind, _best_glide_kts
+                )
+                cells          = apply_glide_mask(
+                    cells, lat, lon,
+                    state.get("altitude_ft", 5000),
+                    _glide_r, _headwind, _best_glide_kts
+                )
+                _reach_stats   = compute_reachability_stats(cells)
+                _reach_stats["max_glide_range_nm"] = round(_glide_nm, 2)
+
+                # ── SIGMET + PIREP (parallel, non-blocking) ──────────────
+                _sigmets, _pireps = await asyncio.gather(
+                    get_active_sigmets(lat, lon, state.get("altitude_ft",5000)),
+                    get_nearby_pireps(lat, lon),
+                )
+                _sigmet_penalty = sigmet_risk_penalty(_sigmets)
+
+                # Apply SIGMET penalty to overall risk (capped at 1.0)
+                if _sigmet_penalty > 0:
+                    _old_overall = risk.get("overall", 0)
+                    risk["overall"] = round(min(1.0, _old_overall + _sigmet_penalty), 3)
+                    if risk["overall"] > 0.7:   risk["level"] = "CRITICAL"
+                    elif risk["overall"] > 0.5: risk["level"] = "HIGH"
+                    elif risk["overall"] > 0.3: risk["level"] = "MODERATE"
+                    risk["sigmet_penalty"] = _sigmet_penalty
+
+                # Glide + no-safe-zone alert
+                if _reach_stats.get("green_reachable", 81) == 0 \
+                        and state.get("altitude_ft", 5000) < 18000:
+                    alerts.insert(0, {
+                        "severity": "CRITICAL",
+                        "message": (
+                            f"NO REACHABLE SAFE ZONE — glide range {round(_glide_nm,1)} nm. "
+                            f"All green cells outside glide envelope."
+                        )
+                    })
+
+                # SIGMET alert
+                for sg in _sigmets[:2]:
+                    alerts.insert(0, {
+                        "severity": "HIGH",
+                        "message": (
+                            f"SIGMET ACTIVE: {sg['hazard']} "
+                            f"({sg.get('qualifier','')}) "
+                            f"FL{sg['alt_lo_ft']//100}–FL{sg['alt_hi_ft']//100}"
+                        )
+                    })
+
+                # PIREP alert (severe only)
+                for pr in _pireps[:1]:
+                    hazstr = ", ".join(pr.get("hazards",[]))
+                    if "SEV" in hazstr or "EXTM" in hazstr:
+                        alerts.append({
+                            "severity": "MODERATE",
+                            "message": f"PIREP nearby: {hazstr}"
+                        })
+
+                # ── Options — NOW after cells+glide (critical fix) ────────
+                options = compute_options(
+                    prob, cells=cells,
+                    aircraft_lat=lat, aircraft_lon=lon,
+                    aircraft_heading=_hdg,
+                )
+
+                result = {
+
+── 6d. ADD new fields to the result dict ──
+
+FIND:
+  result = {
+      "alerts":       alerts,
+
+FIND the closing of the result dict (the line with "crowd_ready": crowd_grid is not None)
+ADD these keys inside the result dict, before the closing }:
+
+                    "glide_range_nm":  round(_glide_nm, 2),
+                    "reachability":    _reach_stats,
+                    "sigmets":         _sigmets,
+                    "pireps_count":    len(_pireps),
+                    "algorithm_version": ALGORITHM_VERSION,
+
+── 6e. ADD new fields to the log_entry() call ──
+
+FIND the log_entry({ call. Inside that dict, ADD these key-value pairs
+(add them after the existing fields — before the closing }):
+
+                    # Aircraft type and glide
+                    "aircraft_type":        state.get("aircraft_type"),
+                    "aircraft_reg":         state.get("aircraft_reg"),
+                    "glide_ratio":          _glide_r,
+                    "max_glide_range_nm":   round(_glide_nm, 2),
+                    "reachable_cells":      _reach_stats.get("reachable_cells"),
+                    "land_reachable_cells": _reach_stats.get("land_reachable"),
+                    "green_reachable_cells":_reach_stats.get("green_reachable"),
+                    "headwind_kts":         _headwind,
+                    "vs_fpm":               state.get("vs_fpm"),
+                    # SIGMET/PIREP
+                    "sigmet_active":  len(_sigmets) > 0,
+                    "sigmet_count":   len(_sigmets),
+                    "sigmet_hazards": ",".join(s.get("hazard","") for s in _sigmets[:3]),
+                    "sigmet_penalty": _sigmet_penalty,
+                    "pirep_hazards_nearby": len(_pireps),
+                    # Best cell enriched
+                    "best_cell_lat":   round((_best_cell["corners"][0][0]+_best_cell["corners"][2][0])/2,5) if _best_cell and _best_cell.get("corners") else None,
+                    "best_cell_lon":   round((_best_cell["corners"][0][1]+_best_cell["corners"][2][1])/2,5) if _best_cell and _best_cell.get("corners") else None,
+                    "best_cell_slope_deg":    _best_cell.get("slope") if _best_cell else None,
+                    "best_cell_elevation_m":  terrain.get("elevation_m"),
+                    "best_cell_surface_type": terrain.get("surface_type"),
+                    "best_cell_is_water":     _best_cell.get("is_water") if _best_cell else None,
+                    # Grid and weather extras
+                    "grid_mode":          "forward" if state.get("forward_grid") else "area",
+                    "algorithm_version":  ALGORITHM_VERSION,
+                    "wx_gust_kts":        weather.get("wind_gust_kts"),
+                    "terrain_surface_type": terrain.get("surface_type"),
+                    "terrain_elevation_m":  terrain.get("elevation_m"),
+                    "is_over_water":      terrain.get("is_water"),
+                    "mem_sessions_count": len(sessions),
+                    "dem_cache_hit":      True,
+                    "crowd_cache_hit":    crowd_grid is not None,
+
+── 6f. ADD analytics API routes at end of app.py (before last line) ──
+
+@app.get("/api/analytics")
+def get_analytics():
+    rows      = load_logs()
+    analytics = compute_analytics(rows)
+    anomalies = detect_log_anomalies(rows)
+    return {"analytics": analytics, "anomalies": anomalies, "log_rows": len(rows)}
+
+@app.get("/api/log-tail")
+def get_log_tail(n: int = 50):
+    rows = load_logs()
+    return {"rows": rows[-n:], "total": len(rows)}
+
+
+════════════════════════════════════════════════════════════
+TASK 7 — UPDATE cloud_app/static/main.js
+════════════════════════════════════════════════════════════
+
+── 7a. ADD new state variables ──
+
+FIND:
+  let latestData            = null;
+
+ADD immediately after it:
+
+let _voiceEnabled   = false;
+let _lastVoiceTxt   = "";
+let _lastVoiceTs    = 0;
+let _nightMode      = false;
+let _glideRangeNm   = 0;
+
+── 7b. In the aircraft normalisation map() inside fetchAircraft ──
+
+FIND the .map((ac) => ({ block that builds the normalised aircraft object.
+FIND the line:
+  source:      "adsb",
+
+ADD these two fields inside the same map() object, after "source":
+
+        aircraft_type: (ac.t  || ac.aircraft_type || "").toUpperCase().slice(0,4) || "UNKN",
+        aircraft_reg:  (ac.r  || ac.aircraft_reg  || "").trim(),
+        vs_fpm:        ac.vs_fpm || ac.baro_rate   || 0,
+
+── 7c. In the selectAircraft() function ──
+
+FIND the JSON.stringify({ block inside selectAircraft() that POSTs to /api/live-state.
+FIND the line:
+  forward_grid: true,
+
+ADD these lines inside that same JSON object, after "forward_grid: true,":
+
+      aircraft_type: ac.aircraft_type || "UNKN",
+      aircraft_reg:  ac.aircraft_reg  || "",
+      vs_fpm:        ac.vs_fpm || 0,
+
+── 7d. In the continuous tracking section ──
+
+FIND the fetch(`/api/live-state/${sessionId}` call inside the setInterval or
+continuous tracking block (the one that fires when selAc moves — look for
+"_selPrevLat" or "selAc.latitude"). In its JSON.stringify body, FIND:
+  heading_deg:  selAc.heading_deg,
+
+ADD after it:
+      aircraft_type: selAc.aircraft_type || "UNKN",
+      aircraft_reg:  selAc.aircraft_reg  || "",
+      vs_fpm:        selAc.vs_fpm || 0,
+
+── 7e. ADD voice, night mode, glide overlay, analytics functions ──
+
+FIND the line:
+  init();
+
+ADD this entire block BEFORE that line:
+
+// ── Voice Alert Engine (Web Speech API — zero dependencies) ──────────────
+function speakAlert(txt) {
+  if (!_voiceEnabled || !window.speechSynthesis) return;
+  const now = Date.now();
+  if (txt === _lastVoiceTxt && now - _lastVoiceTs < 14000) return;
+  _lastVoiceTxt = txt; _lastVoiceTs = now;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(txt);
+  u.rate = 0.90; u.pitch = 1.0; u.volume = 1.0;
+  window.speechSynthesis.speak(u);
+}
+
+function buildVoiceText(data) {
+  if (!data) return null;
+  const lvl     = data.risk?.level;
+  const opts    = data.options || [];
+  const primary = opts.find(o => o.type === "PRIMARY") || opts[0];
+  const reach   = data.reachability || {};
+  const sigs    = data.sigmets || [];
+  if (lvl === "CRITICAL") {
+    let msg = "Warning. Critical risk. ";
+    if (reach.green_reachable === 0) msg += "No safe zone within glide range. ";
+    if (sigs.length) msg += `SIGMET active: ${sigs[0].hazard}. `;
+    if (primary?.bearing_deg != null)
+      msg += `Best option bearing ${primary.bearing_deg} degrees`;
+    if (primary?.distance_nm)
+      msg += `, ${primary.distance_nm} nautical miles`;
+    msg += `. Success ${Math.round((primary?.success_probability||0)*100)} percent.`;
+    return msg;
+  }
+  if (lvl === "HIGH") {
+    let msg = "High risk. ";
+    if (sigs.length) msg += `SIGMET ${sigs[0].hazard} active. `;
+    msg += `Prepare for emergency landing. Heading ${data.guidance?.safe_heading_deg||"--"} degrees.`;
+    return msg;
+  }
+  return null;
+}
+
+// ── Night / Red Cockpit Mode ──────────────────────────────────────────────
+function toggleNightMode() {
+  _nightMode = !_nightMode;
+  document.body.classList.toggle("night-mode", _nightMode);
+  document.getElementById("nightModeBtn").textContent =
+    _nightMode ? "☀️ Day Mode" : "🌙 Night Mode";
+}
+
+// ── Glide Range Overlay ───────────────────────────────────────────────────
+function updateGlideOverlay(data) {
+  const el = document.getElementById("glideOverlay");
+  const tx = document.getElementById("glideText");
+  if (!el || !data?.glide_range_nm) { if(el) el.style.display="none"; return; }
+  const r = data.reachability || {};
+  el.style.display = "block";
+  tx.textContent   =
+    `✈ Glide ${data.glide_range_nm} nm  |  ` +
+    `Reachable ${r.reachable_cells??'--'}/81  |  ` +
+    `Safe reachable ${r.green_reachable??'--'}`;
+}
+
+// ── Analytics Dashboard ───────────────────────────────────────────────────
+async function showAnalytics() {
+  document.getElementById("analyticsModal").style.display = "block";
+  document.getElementById("analyticsContent").innerHTML =
+    "<p style='color:#99a8c6;padding:12px'>Loading analytics…</p>";
+  try {
+    const resp = await fetch("/api/analytics");
+    const json = await resp.json();
+    const a    = json.analytics || {};
+    const anoms= json.anomalies || [];
+    let h = "";
+    const row = (label, val, col) =>
+      `<div class="analytics-stat"><span>${label}</span>` +
+      `<span${col?` style="color:${col}"`:""}>${val}</span></div>`;
+    h += `<div class="analytics-section-title">Session Overview</div>`;
+    h += row("Total log records",   a.total_records||0);
+    h += row("Unique sessions",     a.unique_sessions||0);
+    h += row("Critical events",     a.critical_events||0,  "#ba2627");
+    h += row("High risk events",    a.high_events||0,       "#ff9c00");
+    h += `<div class="analytics-section-title">Decision Quality</div>`;
+    h += row("Mean success probability", ((a.mean_success_prob||0)*100).toFixed(1)+"%");
+    h += row("Mean green cells/tick",    a.mean_green_cells||0);
+    h += `<div class="analytics-section-title">System Performance</div>`;
+    h += row("Tick latency p50", (a.tick_ms_p50||0)+" ms");
+    h += row("Tick latency p95", (a.tick_ms_p95||0)+" ms");
+    h += row("Terrain live %",   (a.pct_terrain_live||0)+"%");
+    h += row("Real METAR %",     (a.pct_metar||0)+"%");
+    h += `<div class="analytics-section-title">Risk Distribution</div>`;
+    const colors = {CRITICAL:"#ba2627",HIGH:"#ff9c00",MODERATE:"#d8d62b",LOW:"#2cb64f"};
+    Object.entries(a.risk_distribution||{}).forEach(([k,v]) => h += row(k,v,colors[k]));
+    h += `<div class="analytics-section-title">Top Aircraft Types</div>`;
+    Object.entries(a.top_aircraft_types||{}).forEach(([k,v]) => h += row(k,v));
+    h += `<div class="analytics-section-title">Weather Sources</div>`;
+    Object.entries(a.wx_source_breakdown||{}).forEach(([k,v]) => h += row(k,v));
+    if (anoms.length) {
+      h += `<div class="analytics-section-title" style="color:#ff9c00">⚠ Anomalies</div>`;
+      anoms.forEach(a => { h += `<div style="color:#ff9c00;padding:4px 0">${esc(a)}</div>`; });
+    }
+    document.getElementById("analyticsContent").innerHTML = h;
+  } catch(e) {
+    document.getElementById("analyticsContent").innerHTML =
+      `<p style='color:#ba2627'>Error: ${e.message}</p>`;
+  }
+}
+
+// ── SIGMET banner ─────────────────────────────────────────────────────────
+function updateSigmetBanner(data) {
+  let el = document.getElementById("sigmetBanner");
+  if (!el) return;
+  const sigs = data?.sigmets || [];
+  if (!sigs.length) { el.style.display="none"; return; }
+  el.style.display = "block";
+  el.innerHTML = "⚡ SIGMET: " +
+    sigs.slice(0,2).map(s=>`${s.hazard} FL${s.alt_lo_ft/100|0}–FL${s.alt_hi_ft/100|0}`).join(" | ");
+}
+
+── 7f. ADD WebSocket data handlers ──
+
+FIND the ws.onmessage handler. Inside it, FIND where `latestData = data;` is set
+(or where the data is first processed after JSON parse). ADD immediately after:
+
+    // Voice
+    const vt = buildVoiceText(data);
+    if (vt) speakAlert(vt);
+    // Glide overlay
+    updateGlideOverlay(data);
+    // SIGMET banner
+    updateSigmetBanner(data);
+    // Critical pulse
+    document.body.classList.toggle("critical-active", data.risk?.level==="CRITICAL");
+    // Glide visual dimming on map cells
+    if (data.cells) {
+      let idx = 0;
+      terrainLayer.eachLayer(layer => {
+        const cell = data.cells[idx++];
+        if (cell && cell.reachable === false) {
+          try { layer.setStyle({opacity:0.25, fillOpacity:0.1, dashArray:"5,4"}); } catch(e){}
+        }
+      });
+    }
+
+── 7g. ADD button event listeners ──
+
+FIND:
+  document.getElementById("clearTrackBtn").addEventListener
+
+ADD these lines BEFORE it:
+
+document.getElementById("nightModeBtn").addEventListener("click", toggleNightMode);
+
+document.getElementById("voiceBtn").addEventListener("click", () => {
+  _voiceEnabled = !_voiceEnabled;
+  const btn = document.getElementById("voiceBtn");
+  btn.textContent = _voiceEnabled ? "🔊 Voice On" : "🔇 Voice Off";
+  btn.classList.toggle("voice-on",  _voiceEnabled);
+  btn.classList.toggle("voice-off", !_voiceEnabled);
+  if (_voiceEnabled) speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
+  document.getElementById("appNotice").textContent =
+    _voiceEnabled ? "🔊 Voice alerts ON." : "🔇 Voice alerts OFF.";
+});
+
+document.getElementById("analyticsBtn").addEventListener("click", showAnalytics);
+document.getElementById("closeAnalyticsBtn").addEventListener("click", () => {
+  document.getElementById("analyticsModal").style.display = "none";
+});
+
+
+════════════════════════════════════════════════════════════
+TASK 8 — UPDATE cloud_app/templates/index.html
+════════════════════════════════════════════════════════════
+
+── 8a. ADD buttons in the Controls card ──
+
+FIND:
+  <button id="clearTrackBtn" class="ghost">Area Mode</button>
+
+ADD these three lines immediately after it:
+
+        <button id="nightModeBtn" class="ghost">🌙 Night Mode</button>
+        <button id="voiceBtn" class="ghost voice-off">🔇 Voice Off</button>
+        <button id="analyticsBtn" class="ghost">📊 Analytics</button>
+
+── 8b. ADD SIGMET banner and modals BEFORE closing </body> tag ──
+
+FIND:
+  <script src="/js/main.js"></script>
+
+ADD this block immediately BEFORE that line:
+
+  <!-- SIGMET Banner -->
+  <div id="sigmetBanner" style="display:none;position:fixed;top:0;left:0;right:0;
+    background:linear-gradient(90deg,#7a1a00,#c04000);color:#fff;
+    font-size:0.82rem;font-weight:600;letter-spacing:0.04em;
+    padding:6px 16px;text-align:center;z-index:2000;pointer-events:none;"></div>
+
+  <!-- Analytics Modal -->
+  <div id="analyticsModal" style="display:none;position:fixed;inset:0;
+    background:rgba(0,0,0,0.88);z-index:9999;overflow-y:auto;padding:24px;">
+    <div style="max-width:780px;margin:0 auto;background:#101a2d;
+      border-radius:12px;padding:24px;color:#e8eefb;
+      border:1px solid rgba(255,255,255,0.08);">
+      <div style="display:flex;justify-content:space-between;
+        align-items:center;margin-bottom:20px;">
+        <h2 style="margin:0;font-size:1.25rem;font-weight:700;">
+          📊 SETL Flight Analytics</h2>
+        <button id="closeAnalyticsBtn"
+          style="background:none;border:1px solid #3a4f7a;color:#99a8c6;
+          padding:5px 14px;border-radius:6px;cursor:pointer;font-size:0.85rem;">
+          ✕ Close</button>
+      </div>
+      <div id="analyticsContent" style="font-size:0.88rem;line-height:1.9;"></div>
+    </div>
+  </div>
+
+  <!-- Glide Range Overlay (sits over map) -->
+  <div id="glideOverlay" style="display:none;position:fixed;
+    bottom:20px;left:50%;transform:translateX(-50%);
+    background:rgba(10,16,30,0.93);border:1px solid #2a3f6f;
+    border-radius:8px;padding:7px 18px;color:#a8c4f0;
+    font-size:0.80rem;font-weight:500;letter-spacing:0.03em;
+    z-index:800;pointer-events:none;white-space:nowrap;">
+    <span id="glideText">Glide range: —</span>
+  </div>
+
+
+════════════════════════════════════════════════════════════
+TASK 9 — APPEND to cloud_app/static/styles.css
+════════════════════════════════════════════════════════════
+
+APPEND this block at the very END of styles.css:
+
+/* ── Night / Red Cockpit Mode ─────────────────────────────────────── */
+body.night-mode {
+  --bg: #0a0000; --panel: #100000; --card: #180000;
+  --text: #ff9980; --muted: #cc6655;
+  --border: rgba(200,50,30,0.15); --input-bg: #120000;
+}
+body.night-mode #map        { filter: brightness(0.38) saturate(0.4) hue-rotate(165deg); }
+body.night-mode .legendBar  { filter: hue-rotate(330deg) saturate(0.5) brightness(0.6); }
+
+/* ── Critical alert pulse ─────────────────────────────────────────── */
+@keyframes critPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(186,38,39,.5); }
+  50%      { box-shadow: 0 0 0 9px rgba(186,38,39,0); }
+}
+body.critical-active .card:first-of-type {
+  animation: critPulse 1.4s ease-in-out infinite;
+  border: 1px solid #ba2627;
+}
+
+/* ── Analytics ────────────────────────────────────────────────────── */
+.analytics-stat {
+  display:flex; justify-content:space-between;
+  padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.06);
+}
+.analytics-stat span:first-child { color:#99a8c6; font-size:0.86rem; }
+.analytics-stat span:last-child  { font-weight:600; color:#e8eefb; }
+.analytics-section-title {
+  color:#4a80c4; font-size:0.75rem; font-weight:700;
+  letter-spacing:0.08em; text-transform:uppercase; margin:14px 0 6px;
+}
+
+/* ── Voice button states ──────────────────────────────────────────── */
+button#voiceBtn.voice-on  { border-color:#2cb64f !important; color:#2cb64f !important; }
+button#voiceBtn.voice-off { border-color:#444    !important; color:#667    !important; }
+
+
+════════════════════════════════════════════════════════════
+TASK 10 — REPLACE requirements.txt
+════════════════════════════════════════════════════════════
+
+Replace the entire file with:
+
+fastapi
+uvicorn[standard]
+websockets
+httpx
+numpy
+jinja2
+python-multipart
+scipy
+pandas
+
+
+════════════════════════════════════════════════════════════
+TASK 11 — VERIFICATION (run these checks after all changes)
+════════════════════════════════════════════════════════════
+
+Run each command and confirm no errors:
+
+python -c "
+from cloud_app.services.glide_engine import get_glide_params, compute_glide_range_nm
+r,b,s = get_glide_params('B738')
+print('B738 glide:', r, 'range at 30000ft:', compute_glide_range_nm(30000,r))
+r2,_,_ = get_glide_params('C172')
+print('C172 glide:', r2, 'range at 5000ft:', compute_glide_range_nm(5000,r2))
+"
+
+python -c "
+from cloud_app.services.sigmet_engine import sigmet_risk_penalty
+fake = [{'hazard':'CONVECTIVE','qualifier':'SEV','alt_lo_ft':10000,'alt_hi_ft':40000}]
+print('SIGMET penalty TS:', sigmet_risk_penalty(fake))
+print('SIGMET penalty empty:', sigmet_risk_penalty([]))
+"
+
+python -c "
+from cloud_app.services.options_engine import compute_options
+cells = [
+  {'corners':[[28.6,77.2],[28.61,77.2],[28.61,77.21],[28.6,77.21]],
+   'is_water':False,'probability':0.82,'slope':2.1,'crowd':0.1,'reachable':True},
+  {'corners':[[28.59,77.19],[28.6,77.19],[28.6,77.2],[28.59,77.2]],
+   'is_water':False,'probability':0.65,'slope':4.0,'crowd':0.2,'reachable':True},
+]
+opts = compute_options({'success':0.75}, cells=cells, aircraft_lat=28.6, aircraft_lon=77.2)
+print('PRIMARY bearing:', opts[0]['bearing_deg'], 'dist:', opts[0]['distance_nm'])
+"
+
+python -c "
+from cloud_app.services.validation_engine import compute_analytics
+print('validation_engine OK:', compute_analytics([]))
+"
+
+python -c "
+import ast, sys
+with open('cloud_app/app.py') as f: src = f.read()
+ast.parse(src)
+print('app.py syntax OK')
+"
+
+python -c "
+import ast
+with open('cloud_app/services/glide_engine.py') as f: src = f.read()
+ast.parse(src)
+with open('cloud_app/services/sigmet_engine.py') as f: src = f.read()
+ast.parse(src)
+with open('cloud_app/services/options_engine.py') as f: src = f.read()
+ast.parse(src)
+print('All new service files syntax OK')
+"
+
+Finally, start the app:
+uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
+
+Confirm:
+1. App starts with no ImportError
+2. GET /api/analytics returns JSON
+3. GET /api/aircraft?lat=28.6&lon=77.2&radius=200 includes aircraft_type field
+4. WebSocket connects and delivers data including glide_range_nm and reachability fields
+5. Browser shows Night Mode, Voice, Analytics buttons in the Controls card
+6. Glide overlay bar appears at map bottom when aircraft is selected
+7. No JavaScript console errors on page load
