@@ -17,6 +17,8 @@ import math
 
 import httpx
 
+from cloud_app.services.notam_engine import notam_runway_penalty
+
 
 # ── OurAirports global state ───────────────────────────────────────────────────
 _OA_DB:      list | None = None   # None = not loaded; [] = load attempted but failed
@@ -213,7 +215,7 @@ def _land_color(risk: float) -> str:
     return "#ba2627"
 
 
-def apply_runway_bonus(cells: list, runways: list) -> list:
+def apply_runway_bonus(cells: list, runways: list, notams: dict | None = None) -> list:
     """
     Post-TOPSIS step: boost probability of land cells near a known runway.
 
@@ -245,11 +247,18 @@ def apply_runway_bonus(cells: list, runways: list) -> list:
             continue
 
         bonus    = 0.05 * (10.0 - min_dist) / 10.0
+        notam_pen = 0.0
+        if notams:
+            closest_rwy = min(runways, key=lambda r: _haversine(clat, clon, r["lat"], r["lon"]))
+            notam_pen = notam_runway_penalty(closest_rwy, notams)
+        net_bonus = max(0.0, bonus - notam_pen)
         old_prob = cell.get("probability", 0.5)
-        new_prob = min(1.0, old_prob + bonus)
+        new_prob = min(1.0, old_prob + net_bonus)
         new_risk = round(1.0 - new_prob, 3)
         cell["probability"] = round(new_prob, 3)
         cell["risk"]        = new_risk
         cell["color"]       = _land_color(new_risk)
+        if net_bonus < bonus:
+            cell["notam_penalised"] = True
 
     return cells

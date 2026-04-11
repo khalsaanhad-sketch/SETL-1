@@ -33,6 +33,7 @@ cloud_app/
     ├── weather_engine.py   # Weather data (Open-Meteo + METAR: gusts, ceiling, precipitation)
     ├── glide_engine.py     # Glide envelope reachability for 40+ aircraft types
     ├── sigmet_engine.py    # NOAA SIGMETs + PIREPs (aviationweather.gov, no key needed)
+    ├── notam_engine.py     # NOAA NOTAM API — closed/contaminated runway detection (10-min cache)
     ├── validation_engine.py # Retrospective analytics, log loading, anomaly detection
     └── log_engine.py       # CSV flight logging with extended columns
 ```
@@ -43,6 +44,7 @@ cloud_app/
 - **Weather Data**: Open-Meteo (free) + METAR/AVWX fallback
 - **Terrain Data**: OpenTopoData SRTM30m (with random fallback)
 - **SIGMETs/PIREPs**: NOAA aviationweather.gov (free, no API key)
+- **NOTAMs**: NOAA aviationweather.gov NOTAM API (free, 10-min spatial cache)
 
 ## API Endpoints
 
@@ -54,7 +56,7 @@ cloud_app/
 ## Frontend Features
 
 - **Night Mode**: Toggle dark cockpit-friendly theme
-- **Voice Alerts**: Web Speech API alerts for CRITICAL/HIGH risk events
+- **Voice Alerts**: Web Speech API alerts with auto-manage (auto-on for CRITICAL/HIGH, auto-off after 5 safe ticks)
 - **Glide Overlay**: Shows glide range, reachable/safe cell counts
 - **SIGMET Banner**: Fixed top banner when SIGMETs affect area
 - **Analytics Modal**: Session stats, risk distribution, decision quality, anomalies
@@ -75,3 +77,10 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - Terrain engine returns 3-tuple: `(slope_grid, roughness_grid, elev_grid)` — all callers must destructure
 - Slope threshold: 15° (aviation standard), terrain clearance floors: <200ft→0.92, <500ft→0.72, <1000ft→0.46
 - CSV log columns include glide metrics, SIGMET data, and extended aircraft fields
+- Risk engine: vs_fpm vertical speed risk (0.04–0.30), QNH pressure correction for true altitude, TTG time-to-ground scalar (1.0–1.40)
+- NOTAM engine: 10-min spatial cache, detects CLOSED (−0.20 runway bonus) and CONTAMINATED (−0.10) airports
+- Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft)
+- Weather engine: haversine station selection (not Euclidean), current UTC hour hourly index, QNH from METAR altimeter setting
+- Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost = |dist-1.5|/dist penalizes both too-close and too-far cells
+- Session management: TTL eviction (1 hour), 500-session cap, input validation (float/string/bool whitelisting)
+- WebSocket reconnect: exponential backoff 1.5s → 30s cap (resets on successful open)

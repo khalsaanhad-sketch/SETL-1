@@ -34,23 +34,24 @@ _WATER_W    = [   0.35,     0.30,   0.20,    0.15  ]
 
 # ── TOPSIS ─────────────────────────────────────────────────────────────────────
 
-def _topsis(matrix: np.ndarray, weights: list) -> np.ndarray:
-    """
-    Return TOPSIS closeness scores (higher = safer site) for each row.
+def _topsis(matrix: np.ndarray, weights: list,
+            cost_cols: list | None = None) -> np.ndarray:
+    if cost_cols is None:
+        cost_cols = list(range(matrix.shape[1]))
 
-    Steps:
-      1. Column-wise Euclidean normalisation
-      2. Multiply by AHP weights
-      3. Identify ideal-best (column min) and ideal-worst (column max)
-      4. Closeness = d_worst / (d_best + d_worst)
-    """
     denom = np.linalg.norm(matrix, axis=0)
     denom[denom == 0] = 1e-9
     n = matrix / denom
     v = n * np.array(weights, dtype=float)
 
-    ideal_best  = v.min(axis=0)
-    ideal_worst = v.max(axis=0)
+    ideal_best  = np.where(
+        [i in cost_cols for i in range(v.shape[1])],
+        v.min(axis=0), v.max(axis=0)
+    )
+    ideal_worst = np.where(
+        [i in cost_cols for i in range(v.shape[1])],
+        v.max(axis=0), v.min(axis=0)
+    )
 
     d_best  = np.sqrt(((v - ideal_best)  ** 2).sum(axis=1))
     d_worst = np.sqrt(((v - ideal_worst) ** 2).sum(axis=1))
@@ -141,10 +142,12 @@ def score_cells(cells: list) -> list:
             water_rows.append([dist, wind, crowd, slope])
         else:
             land_idx.append(idx)
-            land_rows.append([slope, rough, dist, crowd, obst])
+            dist_cost = abs(dist - 1.5) / max(dist + 0.01, 1.0)
+            land_rows.append([slope, rough, dist_cost, crowd, obst])
 
     if land_rows:
-        scores = _topsis(np.array(land_rows, dtype=float), _LAND_W)
+        scores = _topsis(np.array(land_rows, dtype=float), _LAND_W,
+                         cost_cols=[0, 1, 2, 3, 4])
         for rank, idx in enumerate(land_idx):
             prob = _logistic(float(scores[rank]))
 
@@ -172,7 +175,8 @@ def score_cells(cells: list) -> list:
             cells[idx]["color"]       = _risk_color(risk, is_water=False)
 
     if water_rows:
-        scores = _topsis(np.array(water_rows, dtype=float), _WATER_W)
+        scores = _topsis(np.array(water_rows, dtype=float), _WATER_W,
+                         cost_cols=[0, 1, 2, 3])
         for rank, idx in enumerate(water_idx):
             prob = _logistic(float(scores[rank]))
             risk = round(1.0 - prob, 3)

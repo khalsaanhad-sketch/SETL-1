@@ -587,6 +587,7 @@ async function fetchAircraft() {
 function draw(data) {
   latestData = data;
 
+  autoManageVoice();
   const vt = buildVoiceText(data);
   if (vt) speakAlert(vt);
   updateGlideOverlay(data);
@@ -755,7 +756,9 @@ function draw(data) {
   const selAc = aircraftFeed.find((a) => a.id === selectedAcId);
   document.getElementById("source").textContent   = selAc ? "live traffic" : "manual";
   document.getElementById("status").textContent   = selAc ? "live traffic selected" : "area mode";
-  document.getElementById("altitude").textContent = `${Math.round(currentAlt)} ft`;
+  const trueAlt = data.true_altitude_ft;
+  document.getElementById("altitude").textContent =
+    trueAlt != null ? `${Math.round(trueAlt)} ft (true)` : `${Math.round(currentAlt)} ft`;
   document.getElementById("speed").textContent    = `${Math.round(currentSpd)} kt`;
   document.getElementById("heading").textContent  = `${Math.round(currentHdg)}°`;
   document.getElementById("riskLevel").textContent =
@@ -916,6 +919,27 @@ function draw(data) {
       `AGL: ${Math.round(g.agl_ft || 0)} ft &nbsp;|&nbsp; Time to ground: ${g.time_to_ground_min ?? "--"} min<br>` +
       `Safe heading: ${g.safe_heading_deg ?? "--"}° &nbsp;|&nbsp; Rec. speed: ${g.recommended_speed_kts ?? "--"} kt<br>` +
       `Success: ${Math.round((p.success || 0) * 100)}% &nbsp;|&nbsp; Confidence: ${Math.round((p.confidence || 0) * 100)}%`;
+
+    const vsRisk = data.vs_risk || 0;
+    if (vsRisk > 0.1) {
+      document.getElementById("opsInfo").innerHTML +=
+        `<br><span style="color:#ba2627;font-weight:bold">&#9888; VS Risk: ${Math.round(vsRisk*100)}%</span>`;
+    }
+    const vsG = g.vs_guidance;
+    if (vsG) {
+      document.getElementById("opsInfo").innerHTML +=
+        `<br><span style="color:#ff9c00;font-weight:bold">${esc(vsG)}</span>`;
+    }
+
+    const notams = data.notams || {};
+    const closedArr = notams.closed || [];
+    const contamArr = notams.contaminated || [];
+    if (closedArr.length || contamArr.length) {
+      let badge = '<br><span style="color:#ba2627;font-weight:bold">[NOTAM]</span> ';
+      if (closedArr.length) badge += `Closed: ${closedArr.join(', ')} `;
+      if (contamArr.length) badge += `Contaminated: ${contamArr.join(', ')}`;
+      document.getElementById("opsInfo").innerHTML += badge;
+    }
   }
 
   // ── Heading-up tracking: keep map rotated to aircraft heading ─────────────
@@ -944,6 +968,34 @@ function draw(data) {
 
 // ── WebSocket connection ───────────────────────────────────────────────────────
 let wsReconnectTimer = null;
+let _wsRetryDelay    = 1500;
+let _voiceManuallySet = false;
+let _lowRiskTickCount = 0;
+
+function autoManageVoice() {
+  if (_voiceManuallySet) return;
+  if (!latestData) return;
+  const lvl = latestData.risk?.level;
+  if (lvl === "CRITICAL" || lvl === "HIGH") {
+    _lowRiskTickCount = 0;
+    if (!_voiceEnabled) {
+      _voiceEnabled = true;
+      const btn = document.getElementById("voiceBtn");
+      btn.textContent = "Voice On";
+      btn.classList.add("voice-on");
+      btn.classList.remove("voice-off");
+    }
+  } else {
+    _lowRiskTickCount++;
+    if (_lowRiskTickCount > 5 && _voiceEnabled) {
+      _voiceEnabled = false;
+      const btn = document.getElementById("voiceBtn");
+      btn.textContent = "Voice Off";
+      btn.classList.add("voice-off");
+      btn.classList.remove("voice-on");
+    }
+  }
+}
 
 function setWsStatus(state) {
   const dot   = document.getElementById("wsDot");
@@ -968,6 +1020,7 @@ function connectWS() {
 
   ws.onopen = () => {
     setWsStatus("connected");
+    _wsRetryDelay = 1500;
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   };
 
@@ -978,8 +1031,8 @@ function connectWS() {
 
   ws.onclose = () => {
     setWsStatus("reconnecting");
-    // 3 s backoff before reconnecting — avoids fast reconnect storms on transient drops
-    wsReconnectTimer = setTimeout(connectWS, 3000);
+    wsReconnectTimer = setTimeout(connectWS, _wsRetryDelay);
+    _wsRetryDelay = Math.min(30000, _wsRetryDelay * 1.5);
   };
 
   ws.onerror = () => {
@@ -1167,6 +1220,7 @@ document.getElementById("trafficSearchBtn").addEventListener("click", () => draw
 document.getElementById("nightModeBtn").addEventListener("click", toggleNightMode);
 
 document.getElementById("voiceBtn").addEventListener("click", () => {
+  _voiceManuallySet = true;
   _voiceEnabled = !_voiceEnabled;
   const btn = document.getElementById("voiceBtn");
   btn.textContent = _voiceEnabled ? "Voice On" : "Voice Off";

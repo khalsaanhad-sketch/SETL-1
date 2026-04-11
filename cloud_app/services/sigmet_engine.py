@@ -15,12 +15,16 @@ _PIREP_CACHE:  dict = {"key": None, "pireps": []}
 
 
 def _point_in_polygon(lat: float, lon: float, coords: list) -> bool:
+    """
+    Ray-casting point-in-polygon test.
+    NOAA coords are [lon, lat] GeoJSON order — index 0 = longitude, index 1 = latitude.
+    """
     n, inside = len(coords), False
     j = n - 1
     for i in range(n):
         xi, yi = coords[i][0], coords[i][1]
         xj, yj = coords[j][0], coords[j][1]
-        if ((yi > lat) != (yj > lat)) and (lon < (xj-xi)*(lat-yi)/(yj-yi+1e-9)+xi):
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-9) + xi):
             inside = not inside
         j = i
     return inside

@@ -74,23 +74,20 @@ async def get_terrain(lat: float, lon: float) -> dict:
         landing_viable = False
     elif elevation < 50:
         surface_type   = "flat"
-        slope_deg      = round(max(0.5, elevation / 500 * 3), 2) if elevation_live else 1.5
+        slope_deg      = 1.5
         landing_viable = True
     elif elevation < 500:
         surface_type   = "hilly"
-        # When elevation is real (API), derive slope proportionally.
-        # When it is the 300 m land-fallback, the true elevation is unknown —
-        # use a conservative 2° rather than the misleading 7.2° that 300 m produces.
-        slope_deg      = round(3 + elevation / 500 * 7, 2) if elevation_live else 2.0
+        slope_deg      = 2.5
         landing_viable = True
     elif elevation < 1500:
         surface_type   = "mountainous"
-        slope_deg      = round(10 + (elevation - 500) / 1000 * 15, 2) if elevation_live else 3.0
+        slope_deg      = 4.0
         landing_viable = True
     else:
         surface_type   = "high_mountain"
-        slope_deg      = round(min(40, 25 + (elevation - 1500) / 1000 * 10), 2) if elevation_live else 5.0
-        landing_viable = False      # Extreme altitude
+        slope_deg      = 6.0
+        landing_viable = False
 
     return {
         "elevation_m":    round(elevation, 1),
@@ -141,7 +138,7 @@ async def get_terrain_grid(
     lon: float,
     steps: int = 4,
     cell_size: float = 0.01,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """
     Return (slope_grid, roughness_grid) as 9×9 numpy arrays aligned with the
     cell layout used by generate_cells() (i, j in range(-steps, steps+1)).
