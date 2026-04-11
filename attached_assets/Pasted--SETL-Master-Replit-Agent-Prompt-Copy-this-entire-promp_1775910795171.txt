@@ -1,0 +1,1006 @@
+# SETL — Master Replit Agent Prompt
+## Copy this entire prompt into your Replit Agent
+
+---
+
+You are working on **SETL** — a Python FastAPI aviation Emergency Flight Bag (EFB) application. The app is already running and deployed. Your task is to apply a comprehensive set of bug fixes and operational improvements **without changing the fundamental architecture, without removing any existing engine, without breaking existing API integrations, and without crashing the app**. Apply every change below exactly as specified. After all changes, the app must start cleanly with `uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000`.
+
+---
+
+## STEP 0 — Verify requirements.txt (do NOT add scipy or pandas — they are not needed)
+
+Open `requirements.txt`. It should contain exactly:
+```
+fastapi
+uvicorn[standard]
+websockets
+httpx
+numpy
+jinja2
+python-multipart
+```
+If `scipy` or `pandas` appear anywhere in requirements.txt, remove them. They are not imported anywhere in this codebase. Do not add them back. Confirm the file is clean.
+
+---
+
+## STEP 1 — Fix `cloud_app/services/risk_engine.py`
+
+Replace the entire file with the following. Key changes: (a) vertical speed (vs_fpm) is now used as a risk modifier — this was the single largest operational omission; (b) QNH pressure deviation is accepted and used to correct barometric altitude before clearance computation; (c) comments are updated.
+
+```python
+def compute_risk(state: dict, weather: dict | None = None) -> dict:
+    altitude    = state.get("altitude_ft", 5000)
+    speed       = state.get("speed_kts", 100)
+    heading     = state.get("heading_deg", 90)
+    vs_fpm      = float(state.get("vs_fpm", 0) or 0)   # vertical speed ft/min (negative = descending)
+
+    # ── QNH pressure-altitude correction ─────────────────────────────────────
+    # Each 1 hPa deviation from standard (1013.25 hPa) ≈ ±30 ft.
+    # Weather engine may supply qnh_hpa from METAR; default to standard if absent.
+    qnh_hpa      = float((weather or {}).get("qnh_hpa", 1013.25) or 1013.25)
+    pressure_corr_ft = (qnh_hpa - 1013.25) * 30.0
+    # True altitude (approximate) = baro altitude + correction
+    true_altitude = altitude + pressure_corr_ft
+
+    # ── Landing / ground state ────────────────────────────────────────────────
+    if altitude <= 100 and speed <= 60:
+        weather_risk = 0.0
+        if weather:
+            wind_kts      = weather.get("wind_speed_kts", 0.0)
+            wind_gust_kts = weather.get("wind_gust_kts", wind_kts)
+            effective_wind = max(wind_kts, wind_gust_kts)
+            if effective_wind > 50:   weather_risk = 0.10
+            elif effective_wind > 30: weather_risk = 0.05
+        overall = round(min(0.15, weather_risk), 3)
+        return {
+            "overall":       overall,
+            "level":         "LOW",
+            "altitude_risk": 0.0,
+            "speed_risk":    round(speed / 300.0, 3),
+            "weather_risk":  round(weather_risk, 3),
+            "vs_risk":       0.0,
+            "heading_deg":   heading,
+            "flight_state":  "landed",
+            "true_altitude_ft": round(true_altitude),
+        }
+
+    # ── Altitude risk ─────────────────────────────────────────────────────────
+    # Use true_altitude for physical clearance risk; original baro altitude for
+    # display continuity.
+    altitude_risk = max(0.0, 1.0 - (max(true_altitude, 101) / 10000.0))
+    speed_risk    = min(1.0, speed / 300.0)
+
+    base = round(altitude_risk * 0.6 + speed_risk * 0.4, 3)
+
+    # ── Vertical speed risk modifier ──────────────────────────────────────────
+    # Negative vs_fpm = descending.  Uncontrolled high-rate descent at low
+    # altitude is the single strongest predictor of imminent CFIT.
+    # Thresholds are based on standard flight operations:
+    #   > -500 fpm normal descent: no penalty
+    #   > -1000 fpm: fast descent requiring attention
+    #   > -2000 fpm: emergency rate — time to impact <2 min at 3000 ft AGL
+    #   > -3000 fpm: structural / uncontrolled emergency
+    vs_risk = 0.0
+    if vs_fpm < -3000:   vs_risk = 0.30
+    elif vs_fpm < -2000: vs_risk = 0.20
+    elif vs_fpm < -1500: vs_risk = 0.12
+    elif vs_fpm < -1000: vs_risk = 0.06
+    elif vs_fpm < -500 and true_altitude < 3000:
+        vs_risk = 0.04   # Fast descent at low altitude — elevated urgency
+
+    # ── Time-to-ground urgency scalar ─────────────────────────────────────────
+    # If descending, compute seconds to ground and amplify risk accordingly.
+    # ttg < 60 s → multiply base risk by 1.4; < 120 s → 1.2; < 180 s → 1.1
+    ttg_scalar = 1.0
+    if vs_fpm < -50:   # meaningfully descending
+        ttg_s = (true_altitude / abs(vs_fpm)) * 60.0
+        if ttg_s < 60:    ttg_scalar = 1.40
+        elif ttg_s < 120: ttg_scalar = 1.20
+        elif ttg_s < 180: ttg_scalar = 1.10
+
+    base = round(min(1.0, base * ttg_scalar), 3)
+
+    # ── Weather modifiers ─────────────────────────────────────────────────────
+    weather_risk = 0.0
+    if weather:
+        wind_kts      = weather.get("wind_speed_kts",    0.0)
+        wind_gust_kts = weather.get("wind_gust_kts",  wind_kts)
+        vis_m         = weather.get("visibility_m",   10000.0)
+        precip_mm     = weather.get("precipitation_mm",  0.0)
+        ceiling_ft    = weather.get("ceiling_ft",         None)
+
+        effective_wind = max(wind_kts, wind_gust_kts)
+        gust_spread    = wind_gust_kts - wind_kts
+        if effective_wind > 50:   weather_risk += 0.35
+        elif effective_wind > 35: weather_risk += 0.20
+        elif effective_wind > 20: weather_risk += 0.08
+        if gust_spread >= 15:     weather_risk += 0.08
+
+        if ceiling_ft is not None:
+            if ceiling_ft < 200:   weather_risk += 0.30
+            elif ceiling_ft < 500: weather_risk += 0.20
+            elif ceiling_ft < 1000:weather_risk += 0.10
+
+        if vis_m < 800:    weather_risk += 0.25
+        elif vis_m < 3000: weather_risk += 0.15
+
+        if precip_mm >= 8:    weather_risk += 0.20
+        elif precip_mm >= 3:  weather_risk += 0.12
+        elif precip_mm > 0:   weather_risk += 0.05
+
+    overall = round(min(1.0, base + weather_risk + vs_risk), 3)
+
+    level = "LOW"
+    if overall > 0.7:   level = "CRITICAL"
+    elif overall > 0.5: level = "HIGH"
+    elif overall > 0.3: level = "MODERATE"
+
+    # Determine qualitative flight state for logging / UI
+    if vs_fpm < -2000 and true_altitude < 5000:
+        flight_state = "emergency_descent"
+    elif vs_fpm < -500:
+        flight_state = "descending"
+    elif vs_fpm > 500:
+        flight_state = "climbing"
+    else:
+        flight_state = "cruise"
+
+    return {
+        "overall":          overall,
+        "level":            level,
+        "altitude_risk":    round(altitude_risk, 3),
+        "speed_risk":       round(speed_risk, 3),
+        "weather_risk":     round(weather_risk, 3),
+        "vs_risk":          round(vs_risk, 3),
+        "ttg_scalar":       round(ttg_scalar, 2),
+        "heading_deg":      heading,
+        "flight_state":     flight_state,
+        "true_altitude_ft": round(true_altitude),
+    }
+```
+
+---
+
+## STEP 2 — Fix `cloud_app/services/terrain_engine.py`
+
+**Change 1:** Fix the `slope_deg` derivation inside `get_terrain()`. The formula `slope_deg = f(elevation)` is physically wrong — slope is the spatial gradient of elevation, not a function of elevation value. Replace only the slope_deg lines inside the if/elif blocks. Find these lines and replace them:
+
+Find this block (the surface classification section):
+```python
+    elif elevation < 50:
+        surface_type   = "flat"
+        slope_deg      = round(max(0.5, elevation / 500 * 3), 2) if elevation_live else 1.5
+        landing_viable = True
+    elif elevation < 500:
+        surface_type   = "hilly"
+        slope_deg      = round(3 + elevation / 500 * 7, 2) if elevation_live else 2.0
+        landing_viable = True
+    elif elevation < 1500:
+        surface_type   = "mountainous"
+        slope_deg      = round(10 + (elevation - 500) / 1000 * 15, 2) if elevation_live else 3.0
+        landing_viable = True
+    else:
+        surface_type   = "high_mountain"
+        slope_deg      = round(min(40, 25 + (elevation - 1500) / 1000 * 10), 2) if elevation_live else 5.0
+        landing_viable = False
+```
+
+Replace with:
+```python
+    elif elevation < 50:
+        surface_type   = "flat"
+        slope_deg      = 1.5   # Conservative default — flat does not mean slope-free
+        landing_viable = True
+    elif elevation < 500:
+        surface_type   = "hilly"
+        slope_deg      = 2.5   # Conservative: hilly terrain, unknown true slope
+        landing_viable = True
+    elif elevation < 1500:
+        surface_type   = "mountainous"
+        slope_deg      = 4.0   # Conservative mountainous default
+        landing_viable = True
+    else:
+        surface_type   = "high_mountain"
+        slope_deg      = 6.0   # Conservative: extreme terrain, true slope unknown
+        landing_viable = False
+```
+
+**Note:** When `get_terrain_grid()` returns real DEM data, per-cell slope is computed accurately via gradient — this fallback is only used when the DEM batch API fails. The conservative defaults prevent false "safe" classifications.
+
+**Change 2:** Fix the return type annotation of `get_terrain_grid`. Find:
+```python
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+```
+Replace with:
+```python
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+```
+
+---
+
+## STEP 3 — Fix `cloud_app/services/decision_engine.py`
+
+**Change 1 — Fix TOPSIS ideal-best direction for distance criterion.**
+
+The current implementation treats the cell nearest to the aircraft as "best" (minimum distance = ideal). This is operationally incorrect — a cell directly under the aircraft has near-zero approach time. Cells at 0.5–3 km are operationally optimal. Replace the `_topsis()` function with this version that supports per-criterion cost/benefit direction:
+
+Find and replace the entire `_topsis` function:
+```python
+def _topsis(matrix: np.ndarray, weights: list,
+            cost_cols: list | None = None) -> np.ndarray:
+    """
+    TOPSIS with per-criterion direction control.
+
+    cost_cols: list of column indices where LOWER value = better (cost criteria).
+               Columns NOT in cost_cols are benefit criteria (higher = better,
+               but we invert them so the same min-is-best logic applies).
+    Default: all columns are cost criteria (lower = safer) — preserves original
+    behaviour for slope, roughness, crowd, obstacle.
+    Distance is a special case: very low AND very high distance are both bad.
+    We convert distance to a "distance from optimal" score before entry.
+    """
+    if cost_cols is None:
+        cost_cols = list(range(matrix.shape[1]))
+
+    denom = np.linalg.norm(matrix, axis=0)
+    denom[denom == 0] = 1e-9
+    n = matrix / denom
+    v = n * np.array(weights, dtype=float)
+
+    # For cost columns: ideal_best = min (lower = safer)
+    # For benefit columns: ideal_best = max (higher = safer), ideal_worst = min
+    ideal_best  = np.where(
+        [i in cost_cols for i in range(v.shape[1])],
+        v.min(axis=0), v.max(axis=0)
+    )
+    ideal_worst = np.where(
+        [i in cost_cols for i in range(v.shape[1])],
+        v.max(axis=0), v.min(axis=0)
+    )
+
+    d_best  = np.sqrt(((v - ideal_best)  ** 2).sum(axis=1))
+    d_worst = np.sqrt(((v - ideal_worst) ** 2).sum(axis=1))
+
+    return d_worst / (d_best + d_worst + 1e-9)
+```
+
+**Change 2 — Pre-process distance column in `score_cells()` before TOPSIS.**
+
+In `score_cells()`, before building the land_rows matrix, add a distance-optimal transform. Find these lines in the `score_cells` for loop:
+```python
+        if c.get("is_water"):
+            water_idx.append(idx)
+            water_rows.append([dist, wind, crowd, slope])
+        else:
+            land_idx.append(idx)
+            land_rows.append([slope, rough, dist, crowd, obst])
+```
+
+Replace with:
+```python
+        if c.get("is_water"):
+            water_idx.append(idx)
+            water_rows.append([dist, wind, crowd, slope])
+        else:
+            land_idx.append(idx)
+            # Distance-from-optimal transform: 0.5–2.5 km is the approach sweet spot.
+            # dist < 0.5 km → barely any approach time, score rises.
+            # dist > 4 km → further away, but glide mask handles true reachability.
+            # We convert to a cost value: penalty for being too close OR too far.
+            dist_cost = abs(dist - 1.5) / max(dist + 0.01, 1.0)
+            land_rows.append([slope, rough, dist_cost, crowd, obst])
+```
+
+**Change 3 — Pass cost_cols explicitly** in the `score_cells` TOPSIS calls. Find:
+```python
+        scores = _topsis(np.array(land_rows, dtype=float), _LAND_W)
+```
+Replace with:
+```python
+        # All columns are cost criteria (lower = better for landing safety)
+        scores = _topsis(np.array(land_rows, dtype=float), _LAND_W,
+                         cost_cols=[0, 1, 2, 3, 4])
+```
+
+Find:
+```python
+        scores = _topsis(np.array(water_rows, dtype=float), _WATER_W)
+```
+Replace with:
+```python
+        scores = _topsis(np.array(water_rows, dtype=float), _WATER_W,
+                         cost_cols=[0, 1, 2, 3])
+```
+
+---
+
+## STEP 4 — Fix `cloud_app/services/glide_engine.py`
+
+**Fix `apply_glide_mask()` to compute wind component on the bearing TO each cell, not on aircraft heading.**
+
+Replace the entire `apply_glide_mask` function with:
+```python
+def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
+                     altitude_ft: float, glide_ratio: float,
+                     headwind_kts: float = 0.0,
+                     best_glide_kts: float = 150.0,
+                     wind_speed_kts: float = 0.0,
+                     wind_dir_deg: float = 0.0) -> list:
+    """
+    Apply glide reachability mask to each cell.
+
+    Wind component is computed on the bearing TO each individual cell
+    (not the aircraft heading), because the pilot turns to face the LZ.
+    This corrects the previous over/under-estimate for off-heading cells.
+    """
+    R = 6371.0
+    for cell in cells:
+        c = cell.get("corners", [])
+        if len(c) < 3:
+            cell["reachable"]       = True
+            cell["glide_margin_nm"] = 99.0
+            continue
+        clat = (c[0][0] + c[2][0]) / 2
+        clon = (c[0][1] + c[2][1]) / 2
+
+        # Bearing from aircraft to cell centre
+        dlat = math.radians(clat - ac_lat)
+        dlon = math.radians(clon - ac_lon)
+        a    = (math.sin(dlat/2)**2 +
+                math.cos(math.radians(ac_lat)) *
+                math.cos(math.radians(clat)) *
+                math.sin(dlon/2)**2)
+        dist_nm = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)) / 1.852
+
+        y = math.sin(math.radians(clon - ac_lon)) * math.cos(math.radians(clat))
+        x = (math.cos(math.radians(ac_lat)) * math.sin(math.radians(clat)) -
+             math.sin(math.radians(ac_lat)) * math.cos(math.radians(clat)) *
+             math.cos(math.radians(clon - ac_lon)))
+        bearing_to_cell = (math.degrees(math.atan2(y, x)) + 360) % 360
+
+        # Per-cell headwind component on the glide path to that cell
+        cell_headwind = compute_headwind(wind_speed_kts, wind_dir_deg, bearing_to_cell)
+
+        max_nm = compute_glide_range_nm(altitude_ft, glide_ratio,
+                                        cell_headwind, best_glide_kts)
+        margin  = round(max_nm - dist_nm, 2)
+        cell["reachable"]       = dist_nm <= max_nm
+        cell["glide_margin_nm"] = margin
+    return cells
+```
+
+---
+
+## STEP 5 — Fix `cloud_app/services/sigmet_engine.py`
+
+**Fix lat/lon coordinate order in `_point_in_polygon()`.**
+
+The NOAA SIGMET API returns coordinates as `[lon, lat]` (GeoJSON standard). The current code uses `coords[i][0]` as "x" compared against `lon` and `coords[i][1]` as "y" compared against `lat`. This is reversed.
+
+Find the `_point_in_polygon` function and replace entirely with:
+```python
+def _point_in_polygon(lat: float, lon: float, coords: list) -> bool:
+    """
+    Ray-casting point-in-polygon test.
+    NOAA coords are [lon, lat] GeoJSON order — index 0 = longitude, index 1 = latitude.
+    We map: xi = longitude (compare against lon), yi = latitude (compare against lat).
+    """
+    n, inside = len(coords), False
+    j = n - 1
+    for i in range(n):
+        xi, yi = coords[i][0], coords[i][1]   # xi=lon, yi=lat
+        xj, yj = coords[j][0], coords[j][1]
+        # Standard ray-cast: horizontal ray from point eastward
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-9) + xi):
+            inside = not inside
+        j = i
+    return inside
+```
+
+---
+
+## STEP 6 — Fix `cloud_app/services/weather_engine.py`
+
+**Change 1 — Fix Open-Meteo hourly index to match current UTC hour.**
+
+Find these lines in `get_weather()` inside the Open-Meteo block:
+```python
+        hourly        = data.get("hourly", {})
+        visibility    = hourly.get("visibility",    [10000])[0]
+        precipitation = hourly.get("precipitation", [0])[0]
+        wind_gust_kmh = hourly.get("windgusts_10m", [wind_speed])[0]
+```
+Replace with:
+```python
+        import datetime as _dt
+        hourly        = data.get("hourly", {})
+        time_list     = hourly.get("time", [])
+        # Find current hour index — Open-Meteo times are ISO strings "YYYY-MM-DDTHH:00"
+        now_iso = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:00")
+        try:
+            hi = time_list.index(now_iso)
+        except (ValueError, AttributeError):
+            hi = 0  # fallback to first slot if time list unavailable
+        visibility    = hourly.get("visibility",    [10000])[hi] if hourly.get("visibility") else 10000
+        precipitation = hourly.get("precipitation", [0])[hi] if hourly.get("precipitation") else 0
+        wind_gust_kmh = hourly.get("windgusts_10m", [wind_speed])[hi] if hourly.get("windgusts_10m") else wind_speed
+```
+
+**Change 2 — Add `hourly=visibility,precipitation,windgusts_10m,time` to Open-Meteo URL** so the time list is returned. Find:
+```python
+            f"&hourly=visibility,precipitation,windgusts_10m"
+```
+Replace with:
+```python
+            f"&hourly=visibility,precipitation,windgusts_10m,time"
+```
+
+**Change 3 — Fix nearest METAR station selection to use great-circle distance instead of Euclidean degree distance.**
+
+Find:
+```python
+        best = min(
+            result,
+            key=lambda s: (float(s.get("lat", lat)) - lat) ** 2
+                        + (float(s.get("lon", lon)) - lon) ** 2,
+        )
+```
+Replace with:
+```python
+        import math as _m
+        def _gc_dist(s):
+            try:
+                slat = float(s.get("lat", lat))
+                slon = float(s.get("lon", lon))
+                dlat = _m.radians(slat - lat)
+                dlon = _m.radians(slon - lon)
+                a = (_m.sin(dlat/2)**2 +
+                     _m.cos(_m.radians(lat)) * _m.cos(_m.radians(slat)) *
+                     _m.sin(dlon/2)**2)
+                return _m.atan2(_m.sqrt(a), _m.sqrt(1-a))
+            except Exception:
+                return float("inf")
+        best = min(result, key=_gc_dist)
+```
+
+**Change 4 — Extract QNH from METAR and include in returned dict.**
+
+Find this block in `_fetch_metar()` just before the `return {` line:
+```python
+        return {
+            "wind_speed_kts":     wind_speed_kts,
+```
+Replace with (add qnh_hpa to the return dict):
+```python
+        # QNH from METAR altim field (inches Hg) → hPa
+        altim_inhg = best.get("altim")
+        try:
+            qnh_hpa = round(float(altim_inhg) * 33.8639, 1) if altim_inhg else 1013.25
+        except (ValueError, TypeError):
+            qnh_hpa = 1013.25
+
+        return {
+            "wind_speed_kts":     wind_speed_kts,
+            "qnh_hpa":            qnh_hpa,
+```
+And add `"qnh_hpa": 1013.25,` to both the Open-Meteo return dict and the static defaults return dict (to keep the same keys everywhere).
+
+In the Open-Meteo return dict, find:
+```python
+            "confidence":         "approx",
+```
+And add `"qnh_hpa":            1013.25,` before it.
+
+In the static defaults return dict, find:
+```python
+            "confidence":         "low",
+```
+And add `"qnh_hpa":            1013.25,` before it.
+
+---
+
+## STEP 7 — Create NEW file `cloud_app/services/notam_engine.py`
+
+Create a new file at `cloud_app/services/notam_engine.py` with this content. It uses the free aviationweather.gov NOTAM API (same server as METAR and SIGMET — no API key needed):
+
+```python
+"""
+SETL NOTAM Engine
+Fetches active NOTAMs for airports within glide range using the free
+aviationweather.gov API (same NOAA host as METAR and SIGMET).
+Used to down-score runways that are NOTAMed CLOSED or contaminated.
+"""
+import time
+import httpx
+
+_NOTAM_URL = "https://aviationweather.gov/api/data/notam?format=json"
+_NOTAM_CACHE: dict = {"key": None, "ts": 0.0, "closed": set(), "contaminated": set()}
+_CACHE_TTL = 600   # 10 minutes — NOTAMs change slowly
+
+# Keywords that indicate a runway/aerodrome is not usable for emergency landing
+_CLOSED_KEYWORDS    = ("CLSD", "CLOSED", "U/S", "UNSERVICEABLE", "NOT AVBL")
+_CONTAMINATED_KEYS  = ("CONTAMINATED", "SNOWBANK", "ICE", "WET SNOW", "SLUSH",
+                        "NIL BRAKING", "POOR BRAKING", "FRICTION")
+
+
+def _cache_key(lat: float, lon: float) -> str:
+    return f"{round(lat, 1)},{round(lon, 1)}"
+
+
+async def get_notam_advisories(lat: float, lon: float,
+                                radius_deg: float = 0.8) -> dict:
+    """
+    Return sets of airport ICAO codes that are currently:
+      - closed (runway/aerodrome CLSD NOTAM active)
+      - contaminated (poor braking action NOTAMs active)
+
+    Uses a bounding box of ±radius_deg (~90 km) around the aircraft.
+    Cached for 10 minutes — NOTAMs are slow-changing.
+    Returns {"closed": set(), "contaminated": set()} on any failure.
+    """
+    key = _cache_key(lat, lon)
+    now = time.monotonic()
+
+    if (_NOTAM_CACHE["key"] == key and
+            now - _NOTAM_CACHE["ts"] < _CACHE_TTL):
+        return {
+            "closed":       _NOTAM_CACHE["closed"],
+            "contaminated": _NOTAM_CACHE["contaminated"],
+        }
+
+    closed, contaminated = set(), set()
+    try:
+        bbox = (f"{lon - radius_deg:.3f},{lat - radius_deg:.3f},"
+                f"{lon + radius_deg:.3f},{lat + radius_deg:.3f}")
+        url = f"{_NOTAM_URL}&bbox={bbox}"
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(url, headers={"User-Agent": "SETL-EFB/1.0"})
+            data = resp.json()
+
+        notams = data if isinstance(data, list) else []
+        for n in notams:
+            icao = (n.get("icaoLocation") or n.get("location") or "").strip().upper()
+            text = (n.get("traditionalMessage") or n.get("message") or "").upper()
+            if not icao or not text:
+                continue
+            if any(kw in text for kw in _CLOSED_KEYWORDS):
+                closed.add(icao)
+            if any(kw in text for kw in _CONTAMINATED_KEYS):
+                contaminated.add(icao)
+
+    except Exception:
+        pass   # Non-critical — fall back gracefully to empty sets
+
+    _NOTAM_CACHE.update({
+        "key": key, "ts": now,
+        "closed": closed, "contaminated": contaminated,
+    })
+    return {"closed": closed, "contaminated": contaminated}
+
+
+def notam_runway_penalty(runway: dict, notams: dict) -> float:
+    """
+    Return a risk penalty for a runway based on active NOTAMs.
+    runway dict must contain 'airport_ident' (ICAO code).
+    Returns 0.0 (no penalty), 0.10 (contaminated), or 0.20 (closed).
+    """
+    if not notams:
+        return 0.0
+    icao = (runway.get("airport_ident") or "").strip().upper()
+    if not icao:
+        return 0.0
+    if icao in notams.get("closed", set()):
+        return 0.20   # Closed aerodrome — runway bonus fully negated
+    if icao in notams.get("contaminated", set()):
+        return 0.10   # Poor braking — partial penalty
+    return 0.0
+```
+
+---
+
+## STEP 8 — Update `cloud_app/services/runway_engine.py`
+
+The runway bonus currently ignores NOTAM status. Update `apply_runway_bonus` to accept an optional `notams` parameter. Find the `apply_runway_bonus` function signature:
+```python
+def apply_runway_bonus(cells: list, runways: list) -> list:
+```
+Replace with:
+```python
+def apply_runway_bonus(cells: list, runways: list, notams: dict | None = None) -> list:
+```
+
+Inside `apply_runway_bonus`, find where the bonus is applied. Find any line that does:
+```python
+            cell["probability"] = min(1.0, cell["probability"] + bonus)
+```
+Replace with:
+```python
+            # Apply NOTAM penalty before adding runway bonus
+            notam_pen = 0.0
+            if notams:
+                from cloud_app.services.notam_engine import notam_runway_penalty
+                notam_pen = notam_runway_penalty(rwy, notams)
+            net_bonus = max(0.0, bonus - notam_pen)
+            cell["probability"] = min(1.0, cell["probability"] + net_bonus)
+            if net_bonus < bonus:
+                cell["notam_penalised"] = True
+```
+
+---
+
+## STEP 9 — Update `cloud_app/app.py`
+
+Apply the following changes to `app.py` in order. Do NOT change anything not specified.
+
+**Change 1 — Add imports at the top.** After the existing import block, add:
+```python
+import asyncio
+from cloud_app.services.notam_engine import get_notam_advisories
+```
+(asyncio is already imported; just add the notam import)
+
+**Change 2 — Add session TTL cleanup.** After `sessions = {}`, add:
+```python
+_SESSION_TTL_S = 3600   # 1 hour — sessions older than this are evicted
+
+def _evict_stale_sessions():
+    """Remove sessions that have not been updated for TTL seconds."""
+    now = time.time()
+    stale = [k for k, v in sessions.items()
+             if now - v.get("_last_seen", now) > _SESSION_TTL_S]
+    for k in stale:
+        sessions.pop(k, None)
+```
+
+**Change 3 — Update `ensure_session` to timestamp each access.**
+
+Find:
+```python
+def ensure_session(sid):
+    if sid not in sessions:
+        sessions[sid] = {
+```
+Replace with:
+```python
+def ensure_session(sid):
+    if len(sessions) > 500:   # Safety cap — evict before growing unbounded
+        _evict_stale_sessions()
+    if sid not in sessions:
+        sessions[sid] = {
+```
+And after `return sessions[sid]` at the bottom of `ensure_session`, add `sessions[sid]["_last_seen"] = time.time()` on the line before return. Specifically find:
+```python
+    return sessions[sid]
+```
+And replace with:
+```python
+    sessions[sid]["_last_seen"] = time.time()
+    return sessions[sid]
+```
+
+**Change 4 — Add input validation to `update_state`.** Find:
+```python
+@app.post("/api/live-state/{sid}")
+async def update_state(sid: str, request: Request):
+    data = await request.json()
+    state = ensure_session(sid)
+    state.update(data)
+    return {"ok": True}
+```
+Replace with:
+```python
+@app.post("/api/live-state/{sid}")
+async def update_state(sid: str, request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid json"}
+
+    # Validate and sanitise numeric fields — prevent NaN/Inf propagation
+    safe = {}
+    FLOAT_FIELDS = {
+        "latitude":    (-90.0,   90.0,  28.6139),
+        "longitude":   (-180.0, 180.0,  77.2090),
+        "altitude_ft": (-2000.0, 60000.0, 5000.0),
+        "speed_kts":   (0.0,    700.0,  100.0),
+        "heading_deg": (0.0,    360.0,   90.0),
+        "vs_fpm":      (-10000.0, 10000.0, 0.0),
+    }
+    for key, (lo, hi, default) in FLOAT_FIELDS.items():
+        if key in data:
+            try:
+                v = float(data[key])
+                import math as _m
+                safe[key] = v if (_m.isfinite(v) and lo <= v <= hi) else default
+            except (ValueError, TypeError):
+                safe[key] = default
+
+    # Pass-through non-numeric fields with a length cap
+    STR_FIELDS = ("aircraft_type", "aircraft_reg", "callsign", "icao24")
+    for key in STR_FIELDS:
+        if key in data and isinstance(data[key], str):
+            safe[key] = data[key][:16]
+
+    # Boolean fields
+    if "forward_grid" in data:
+        safe["forward_grid"] = bool(data["forward_grid"])
+
+    state = ensure_session(sid)
+    state.update(safe)
+    return {"ok": True}
+```
+
+**Change 5 — Pass `vs_fpm` into the state from live aircraft data.** The `vs_fpm` field is already sent via `POST /api/live-state/{sid}` from the frontend when an aircraft is selected, and it is now validated above. No further backend change needed for this — it flows through.
+
+**Change 6 — Integrate NOTAM engine in the WebSocket loop.** In the `ws_endpoint` function, find this block (after the runways fetch):
+```python
+                runways = get_cached_runways(lat, lon)
+
+                # Terrain, weather, and DEM run in parallel — none blocked by Overpass
+                terrain, weather, _dem = await asyncio.gather(
+```
+Replace with:
+```python
+                runways = get_cached_runways(lat, lon)
+
+                # Terrain, weather, DEM, and NOTAMs run in parallel
+                terrain, weather, _dem, _notams = await asyncio.gather(
+                    get_terrain(lat, lon),
+                    get_weather(lat, lon),
+                    get_terrain_grid(lat, lon),
+                    get_notam_advisories(lat, lon),
+                )
+```
+Then remove the standalone `terrain, weather, _dem = await asyncio.gather(...)` line (it was just replaced).
+
+**Change 7 — Pass `notams` to `apply_runway_bonus`.** Find:
+```python
+                cells = apply_runway_bonus(cells, runways)
+```
+Replace with:
+```python
+                cells = apply_runway_bonus(cells, runways, notams=_notams)
+```
+
+**Change 8 — Pass per-cell wind to `apply_glide_mask`.** Find:
+```python
+                cells          = apply_glide_mask(
+                    cells, lat, lon,
+                    state.get("altitude_ft\", 5000),
+                    _glide_r, _headwind, _best_glide_kts
+                )
+```
+Replace with:
+```python
+                cells          = apply_glide_mask(
+                    cells, lat, lon,
+                    state.get("altitude_ft", 5000),
+                    _glide_r, _headwind, _best_glide_kts,
+                    wind_speed_kts=weather.get("wind_speed_kts", 0.0),
+                    wind_dir_deg=weather.get("wind_direction_deg", 0.0),
+                )
+```
+
+**Change 9 — Add notam data to the WS result payload** and include `true_altitude_ft` from risk. Find:
+```python
+                result = {
+                    "alerts":       alerts,
+```
+And inside the result dict, add after `"sigmets": _sigmets,`:
+```python
+                    "notams_closed_count":  len(_notams.get("closed", [])),
+                    "notams_contaminated_count": len(_notams.get("contaminated", [])),
+                    "true_altitude_ft": risk.get("true_altitude_ft", state.get("altitude_ft", 5000)),
+                    "vs_risk":       risk.get("vs_risk", 0.0),
+                    "ttg_scalar":    risk.get("ttg_scalar", 1.0),
+```
+
+**Change 10 — Add `notam_advisories` to `get_notam_advisories` import at the top of app.py.** The import is already added in Change 1. Confirm it is present.
+
+---
+
+## STEP 10 — Update `cloud_app/static/main.js`
+
+Make the following changes to `main.js`. Do NOT rewrite the entire file — apply targeted changes only.
+
+**Change 1 — Add WebSocket auto-reconnect with exponential backoff.**
+
+Find the WebSocket connection setup (wherever `ws = new WebSocket(...)` appears and the `ws.onclose` handler). Replace or add the following pattern — wrap the entire WS init in a reconnecting function:
+
+Find any existing WS initialisation (look for `ws = new WebSocket` and any `ws.onmessage`, `ws.onclose`, `ws.onerror`). Replace the entire WebSocket setup block with:
+
+```javascript
+// ── WebSocket with auto-reconnect (exponential backoff) ──────────────────────
+let _wsRetryDelay = 1500;   // ms — starts at 1.5s, doubles each failure, cap 30s
+let _wsRetryTimer = null;
+let _wsIntentionalClose = false;
+
+function initWS() {
+  if (!sessionId) return;
+  _wsIntentionalClose = false;
+  clearTimeout(_wsRetryTimer);
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/${sessionId}`);
+
+  ws.onopen = () => {
+    _wsRetryDelay = 1500;   // reset backoff on successful connect
+    document.getElementById("appNotice").textContent = "Live connection established.";
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      latestData = data;
+      handleWsData(data);
+    } catch (e) {
+      console.warn("WS parse error:", e);
+    }
+  };
+
+  ws.onerror = (e) => {
+    console.warn("WebSocket error:", e);
+  };
+
+  ws.onclose = (evt) => {
+    if (_wsIntentionalClose) return;
+    document.getElementById("appNotice").textContent =
+      `Connection lost — reconnecting in ${Math.round(_wsRetryDelay / 1000)}s…`;
+    _wsRetryTimer = setTimeout(() => {
+      _wsRetryDelay = Math.min(_wsRetryDelay * 2, 30000);
+      initWS();
+    }, _wsRetryDelay);
+  };
+}
+
+function closeWS() {
+  _wsIntentionalClose = true;
+  clearTimeout(_wsRetryTimer);
+  if (ws) { try { ws.close(); } catch(e){} ws = null; }
+}
+```
+
+Then ensure that wherever `sessionId` is first obtained (the `fetch("/api/session")` call), `initWS()` is called instead of the previous WebSocket setup code.
+
+**Change 2 — Fix voice alert to always cancel queue before speaking** (already partially done in the existing code — verify and ensure `window.speechSynthesis.cancel()` is called before every `speak()` call):
+
+Find the `speakAlert` function. Confirm it has `window.speechSynthesis.cancel()` before `speak()`. It already does in your existing code — leave it as-is.
+
+**Change 3 — Add automatic voice mode logic.** The voice should:
+- Auto-activate when risk reaches CRITICAL and no safe zone is within glide range
+- Auto-activate when a NO_REACHABLE_SAFE_ZONE alert fires
+- Auto-deactivate when risk returns to LOW or MODERATE for 3+ consecutive ticks
+- Never auto-deactivate if the user manually toggled voice ON
+
+Add these variables near the existing voice state variables:
+```javascript
+let _voiceManuallySet  = false;   // true if user explicitly toggled voice
+let _lowRiskTickCount  = 0;       // consecutive ticks at LOW/MODERATE risk
+const LOW_RISK_AUTO_OFF_TICKS = 4; // auto-off after 4 consecutive safe ticks
+```
+
+Find the `speakAlert` function. After it, add this new function:
+```javascript
+function autoManageVoice(data) {
+  if (_voiceManuallySet) return;   // respect manual user choice
+
+  const lvl        = data?.risk?.level;
+  const noSafeZone = (data?.reachability?.green_reachable === 0);
+  const hasAircraft = selectedAcId !== null;
+
+  // Auto-ON conditions
+  if (hasAircraft && (lvl === "CRITICAL" || (lvl === "HIGH" && noSafeZone))) {
+    if (!_voiceEnabled) {
+      _voiceEnabled = true;
+      const btn = document.getElementById("voiceBtn");
+      if (btn) btn.textContent = "Voice ON";
+      speakAlert("Voice alerts activated. " + (buildVoiceText(data) || ""));
+    }
+    _lowRiskTickCount = 0;
+    return;
+  }
+
+  // Auto-OFF conditions — requires consecutive safe ticks
+  if (lvl === "LOW" || lvl === "MODERATE" || !hasAircraft) {
+    _lowRiskTickCount++;
+    if (_voiceEnabled && _lowRiskTickCount >= LOW_RISK_AUTO_OFF_TICKS) {
+      _voiceEnabled = false;
+      _lowRiskTickCount = 0;
+      const btn = document.getElementById("voiceBtn");
+      if (btn) btn.textContent = "Voice OFF";
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+    }
+  } else {
+    _lowRiskTickCount = 0;
+  }
+}
+```
+
+Find wherever the voice toggle button is handled (look for `voiceBtn` click handler or `_voiceEnabled = !_voiceEnabled`). Replace with:
+```javascript
+document.getElementById("voiceBtn")?.addEventListener("click", () => {
+  _voiceManuallySet = true;
+  _voiceEnabled = !_voiceEnabled;
+  document.getElementById("voiceBtn").textContent = _voiceEnabled ? "Voice ON" : "Voice OFF";
+  if (!_voiceEnabled && window.speechSynthesis) window.speechSynthesis.cancel();
+  if (_voiceEnabled) speakAlert("Voice alerts enabled.");
+});
+```
+
+**Change 4 — Call `autoManageVoice` and `speakAlert` in the WebSocket message handler.** Find wherever `speakAlert` is called with `buildVoiceText(data)` (inside the WS message handler). Ensure the call to `autoManageVoice(data)` happens BEFORE `speakAlert`. If a `handleWsData(data)` function exists, add `autoManageVoice(data);` at the start of it. If WS data is handled inline in `ws.onmessage`, add `autoManageVoice(data);` before the existing speakAlert call.
+
+**Change 5 — Display `true_altitude_ft` and `vs_risk` in the ops info panel.** Find wherever altitude is displayed in the ops info / decision box panel. Add display of the QNH-corrected true altitude when it differs from barometric by more than 50 ft:
+
+In whatever function renders the OPS panel, find a line like:
+```javascript
+`<b>ALT:</b> ${data.terrain?....`
+```
+or similar. After the altitude display, add (adapt to your existing template string style):
+```javascript
+const trueAlt = data.true_altitude_ft;
+const baroAlt = state?.altitude_ft || currentAlt;
+const altDiff = Math.abs(trueAlt - baroAlt);
+const altStr  = altDiff > 50
+  ? `${Math.round(baroAlt).toLocaleString()} ft baro / ${Math.round(trueAlt).toLocaleString()} ft true`
+  : `${Math.round(baroAlt).toLocaleString()} ft`;
+```
+
+**Change 6 — Show NOTAM warning badge on runways that are penalised.** In whatever function renders the landing options/cells panel, if a cell has `notam_penalised: true`, append a small `[NOTAM]` badge to its label.
+
+**Change 7 — Add VS risk indicator to the risk panel.** Find the risk level display code. After the risk level badge, add a vertical speed indicator line:
+```javascript
+const vsRisk = data.vs_risk || 0;
+const vsRiskStr = vsRisk > 0.15 ? '⚠ High descent rate' : vsRisk > 0.05 ? 'Elevated descent rate' : '';
+```
+Display this string in the risk panel when non-empty.
+
+---
+
+## STEP 11 — Update `cloud_app/services/guidance_engine.py`
+
+Open `guidance_engine.py`. Add VS-aware guidance. Find the `compute_guidance` function. After any existing return dict is built, add `vs_fpm` to the guidance output. Find the return statement and add:
+
+```python
+    vs_fpm = float(state.get("vs_fpm", 0) or 0)
+    if vs_fpm < -2000:
+        vs_guidance = "MAYDAY: Abnormal descent rate. Declare emergency. Squawk 7700."
+    elif vs_fpm < -1000:
+        vs_guidance = "High descent rate detected. Reduce rate. Check for engine abnormality."
+    else:
+        vs_guidance = None
+```
+And include `"vs_guidance": vs_guidance` in the return dict.
+
+---
+
+## STEP 12 — Final checks
+
+After all changes are applied:
+
+1. Run `python -c "from cloud_app.app import app; print('Import OK')"` to verify no import errors.
+2. Check that `notam_engine.py` is importable: `python -c "from cloud_app.services.notam_engine import get_notam_advisories; print('NOTAM OK')"`.
+3. Verify requirements.txt has NO scipy, NO pandas — only: fastapi, uvicorn[standard], websockets, httpx, numpy, jinja2, python-multipart.
+4. Run the app: `uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000` — it must start without errors.
+5. Open the app in the browser. The WebSocket should connect. Select an aircraft. Verify the risk panel updates every ~1.5 seconds.
+6. Do NOT install any new packages. All functionality uses only packages already in requirements.txt plus Python stdlib.
+
+---
+
+## Summary of All Changes Applied
+
+| # | File | Change |
+|---|------|--------|
+| 1 | requirements.txt | Confirm no scipy/pandas |
+| 2 | risk_engine.py | Add vs_fpm, QNH pressure correction, time-to-ground scalar, flight_state labels |
+| 3 | terrain_engine.py | Fix wrong slope=f(elevation) formula; fix return type annotation |
+| 4 | decision_engine.py | Fix TOPSIS per-criterion direction; add distance-optimal transform |
+| 5 | glide_engine.py | Per-cell bearing wind component in apply_glide_mask |
+| 6 | sigmet_engine.py | Fix GeoJSON lon/lat coordinate order in point-in-polygon |
+| 7 | weather_engine.py | Fix hourly index to current UTC hour; haversine station selection; QNH extraction |
+| 8 | notam_engine.py | NEW — free NOAA NOTAM API, runway closed/contaminated detection |
+| 9 | runway_engine.py | Accept and apply notams dict in apply_runway_bonus |
+| 10 | app.py | Session TTL eviction; input validation; NOTAM integration; per-cell wind in glide; true altitude in payload |
+| 11 | main.js | WS auto-reconnect with backoff; voice auto-on/off management; VS risk display; NOTAM badge; true altitude display |
+| 12 | guidance_engine.py | VS-aware guidance text |
+
+No fundamental architecture changes. No new paid APIs. No new packages required. All existing engines preserved. All existing API integrations preserved.
