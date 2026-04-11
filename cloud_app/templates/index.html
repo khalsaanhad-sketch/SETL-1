@@ -38,6 +38,9 @@
           </div>
           <div class="buttons">
             <button id="clearTrackBtn" class="ghost">Area Mode</button>
+            <button id="nightModeBtn" class="ghost">Night Mode</button>
+            <button id="voiceBtn" class="ghost voice-off">Voice Off</button>
+            <button id="analyticsBtn" class="ghost">Analytics</button>
           </div>
           <div id="appNotice" class="mini">Ready.</div>
         </div>
@@ -90,6 +93,22 @@
         </div>
         <div id="map"></div>
       </main>
+    </div>
+
+    <div id="sigmetBanner" style="display:none"></div>
+
+    <div id="glideOverlay" style="display:none">
+      <span id="glideText"></span>
+    </div>
+
+    <div id="analyticsModal" style="display:none">
+      <div class="analytics-inner">
+        <div class="analytics-header">
+          <h2>SETL Analytics</h2>
+          <button id="closeAnalyticsBtn" class="ghost">Close</button>
+        </div>
+        <div id="analyticsContent"></div>
+      </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
