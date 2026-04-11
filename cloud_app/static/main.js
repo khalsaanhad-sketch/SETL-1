@@ -1171,8 +1171,24 @@ async function init() {
 
   connectWS();
   fetchAircraft();
-  setInterval(fetchAircraft, 6000);
+  _acInterval = setInterval(fetchAircraft, 6000);
 }
+
+// ── Aircraft poll interval — paused when tab is hidden ────────────────────────
+// Storing the interval ID lets us clear it when the user switches away and
+// restart it the moment they return, with an immediate sync call so the traffic
+// list is never more than one tick stale after a tab switch.
+let _acInterval = null;
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearInterval(_acInterval);
+    _acInterval = null;
+  } else {
+    fetchAircraft();
+    _acInterval = setInterval(fetchAircraft, 6000);
+  }
+});
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 document.getElementById("connectBtn").addEventListener("click", async () => {
@@ -1182,7 +1198,9 @@ document.getElementById("connectBtn").addEventListener("click", async () => {
   sessionId  = data.session_id;
   document.getElementById("sessionId").value = sessionId.slice(0, 8) + "…";
   connectWS();
+  clearInterval(_acInterval);
   fetchAircraft();
+  _acInterval = setInterval(fetchAircraft, 6000);
   document.getElementById("appNotice").textContent = "Reconnected.";
 });
 
