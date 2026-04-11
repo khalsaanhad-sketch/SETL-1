@@ -414,8 +414,8 @@ async function selectAircraft(ac) {
   // animation lands with the correct bearing already set.
   setMapBearing(ac.heading_deg);
 
-  // Zoom 12: tight enough to show the 9×9 risk grid clearly in nose-forward mode
-  map.flyTo([ac.latitude, ac.longitude], 12, { animate: true, duration: 0.8 });
+  // Zoom 10: consistent with initial load and location search
+  map.flyTo([ac.latitude, ac.longitude], 10, { animate: true, duration: 0.8 });
   drawTraffic();
   drawTrafficList();
 
@@ -1084,7 +1084,7 @@ async function searchLocation(query) {
                   ? firstName + " Airport"
                   : firstName;
 
-    map.flyTo([lat, lon], 11, { animate: true, duration: 0.8 });
+    map.flyTo([lat, lon], 10, { animate: true, duration: 0.8 });
     currentLat = lat;
     currentLon = lon;
 
@@ -1202,7 +1202,7 @@ if (_demoBtnEl) _demoBtnEl.addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({ latitude: lat, longitude: lon, altitude_ft: 2725, speed_kts: 177, heading_deg: 272 }),
   });
-  map.setView([lat, lon], 12);
+  map.setView([lat, lon], 10);
   fetchAircraft();
   document.getElementById("appNotice").textContent = "Demo mode active — Delhi approach area.";
 });
