@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+websockets
+httpx
+numpy
+jinja2
+python-multipart
