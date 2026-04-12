@@ -1,0 +1,355 @@
+# SETL v2 — Targeted Fix Prompt
+## Paste this entire prompt into Replit Agent and execute every step in order.
+
+You are working on SETL — a Python FastAPI aviation EFB.
+Do NOT change any fundamental architecture, data sources, API integrations, or engines.
+After all steps, the app must start cleanly with:
+  uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
+
+---
+
+## STEP A — Fix GitHub log push (privacy/security)
+
+Open cloud_app/services/log_engine.py.
+
+Find the block that starts with:
+  should_push = (_entry_count >= 20) or (elapsed >= 300)
+  if should_push and not _push_in_flight:
+
+Replace with:
+  # Only push if explicitly enabled via environment variable.
+  # Default: DISABLED to protect pilot location and flight data privacy.
+  _GITHUB_PUSH_ENABLED = os.environ.get("SETL_GITHUB_LOG_PUSH", "").lower() == "true"
+  should_push = _GITHUB_PUSH_ENABLED and ((_entry_count >= 20) or (elapsed >= 300))
+  if should_push and not _push_in_flight:
+
+Then add at the top of log_engine.py (with other imports):
+  import os
+
+---
+
+## STEP B — Fix generate_cells() dead parameter
+
+Open cloud_app/app.py.
+
+Find:
+  def generate_cells(state, terrain, prob, weather=None,
+
+Replace with:
+  def generate_cells(state, terrain, _prob_unused=None, weather=None,
+
+This makes the dead parameter explicit and prevents confusion.
+The TOPSIS pipeline in score_cells() handles all probability computation internally.
+
+---
+
+## STEP C — Fix speed_risk formula in cloud_app/services/risk_engine.py
+
+The current formula speed_risk = min(1.0, speed / 300.0) does not penalise
+very low speed (near stall) which is equally dangerous. Replace with a
+U-shaped formula that penalises both extremes.
+
+Find:
+  speed_risk    = min(1.0, speed / 300.0)
+
+Replace with:
+  # U-shaped speed risk: penalty for both very high speed (structural/energy)
+  # and very low speed (stall risk). Minimum risk at normal cruise (100-150 kts).
+  # At 0 kts: risk=1.0, at 100 kts: risk=0.33, at 150 kts: risk=0.18 (minimum),
+  # at 300 kts: risk=1.0.
+  _spd_opt = 130.0   # kts — optimal approach speed (mid-GA range)
+  _spd_sig = 120.0   # kts — spread
+  _spd_raw = 1.0 - math.exp(-0.5 * ((speed - _spd_opt) / _spd_sig) ** 2)
+  speed_risk = round(min(1.0, max(0.0, _spd_raw)), 3)
+
+Note: math is already imported in risk_engine.py. If not, add: import math
+
+---
+
+## STEP D — Complete voice system rewrite in cloud_app/static/main.js
+
+### Scientific basis (do not remove this comment):
+# Aviation human factors (FAA AC 25.1322-1, DOT/FAA/AM-07/4, ICAO Annex 6):
+# Voice (aural) alerts = WARNING category only = immediate corrective action required.
+# Sustained HIGH/CRITICAL risk states during planned flight operations must NOT
+# trigger repeated voice — this causes alarm fatigue (Bliss & Gilson 1998) where
+# pilots habituate and stop responding to genuine emergencies.
+# CORRECT model: voice triggers on EVENTS (state transitions), not STATES.
+# TCAS II and GPWS/TAWS are the operational benchmarks: voice only on RA, not TA.
+
+### D-1: Replace the global voice variables block
+
+Find these lines near the top of main.js:
+  let _voiceEnabled      = false;
+  let _lastSpokenLevel   = null;
+  let _lastSpeakTime     = 0;
+  let _voiceManualOff    = false;   // true ONLY when user explicitly clicked Voice Off
+
+Replace with:
+  let _voiceEnabled      = false;
+  let _voiceManualOff    = false;    // true only when user EXPLICITLY clicked Voice Off
+  let _lastSpokenLevel   = null;     // last risk level that triggered a voice alert
+  let _lastSpeakTime     = 0;        // ms timestamp of last speech
+  let _prevFlightState   = null;     // previous flight_state (for transition detection)
+  let _prevGreenReach    = null;     // previous green_reachable count
+  let _prevSigmetCount   = 0;        // previous SIGMET count
+  let _prevCeilingFt     = null;     // previous ceiling_ft
+  let _prevVsFpm         = 0;        // previous vs_fpm (for rate-of-change)
+  const _VOICE_CRITICAL_REPEAT_MS  = 90_000;   // 90s repeat at CRITICAL (not 30s)
+  const _VOICE_HIGH_REPEAT_MS      = 180_000;  // 3 min repeat at HIGH (or never)
+
+### D-2: Replace the entire autoManageVoice() function
+
+Find the entire autoManageVoice() function and replace it with:
+
+  function autoManageVoice() {
+    if (!latestData) return;
+    const lvl = latestData.risk?.level;
+
+    // CRITICAL always re-enables voice regardless of manual-off
+    // (safety override — pilot must hear MAYDAY-level events)
+    if (lvl === "CRITICAL" && !_voiceEnabled) {
+      _voiceEnabled   = true;
+      _voiceManualOff = false;
+      _updateVoiceBtn();
+    }
+
+    // HIGH only auto-enables if user has not manually turned off
+    if (lvl === "HIGH" && !_voiceEnabled && !_voiceManualOff) {
+      _voiceEnabled = true;
+      _updateVoiceBtn();
+    }
+
+    // Auto-disable after 12 safe ticks when not manually set
+    if (lvl !== "CRITICAL" && lvl !== "HIGH") {
+      _lowRiskTickCount++;
+      if (_lowRiskTickCount > 12 && _voiceEnabled && !_voiceManualOff) {
+        _voiceEnabled = false;
+        _lastSpokenLevel = null;
+        _lastSpeakTime   = 0;
+        window.speechSynthesis?.cancel();
+        _updateVoiceBtn();
+      }
+    } else {
+      _lowRiskTickCount = 0;
+    }
+
+    // Degraded data banner
+    const conf = latestData.weather?.confidence;
+    const terrainLive = latestData.terrain?.elevation_live;
+    const degraded = (conf === "low") || (terrainLive === false && latestData.terrain);
+    const banner = document.getElementById("degradedBanner");
+    if (banner) banner.style.display = degraded ? "block" : "none";
+  }
+
+### D-3: Replace the voice-trigger logic inside draw()
+
+Find this entire block inside the draw(data) function:
+  const _lvl = data.risk?.level;
+  if (_voiceEnabled && (_lvl === "CRITICAL" || _lvl === "HIGH")) {
+    const _now        = Date.now();
+    const _levelShift = _lvl !== _lastSpokenLevel;
+    const _reminder   = _now - _lastSpeakTime > 30_000;
+    if (_levelShift || _reminder) {
+      const vt = buildVoiceText(data);
+      if (vt) { speakAlert(vt); _lastSpokenLevel = _lvl; _lastSpeakTime = _now; }
+    }
+  } else if (_lvl !== "CRITICAL" && _lvl !== "HIGH") {
+    _lastSpokenLevel = null;   // reset so next escalation speaks immediately
+  }
+
+Replace it with:
+
+  const _lvl          = data.risk?.level;
+  const _flightState  = data.risk?.flight_state;
+  const _vsFpm        = data.risk ? (data.risk.vs_risk > 0 ? -Math.abs(_prevVsFpm || 0) : 0) : 0;
+  const _greenReach   = data.reachability?.green_reachable ?? null;
+  const _sigmetCount  = (data.sigmets || []).length;
+  const _ceilingFt    = data.weather?.ceiling_ft ?? null;
+  const _now          = Date.now();
+
+  // ── EVENT-BASED voice trigger logic ─────────────────────────────────────────
+  // Voice fires on STATE TRANSITIONS (events), not on sustained background states.
+  // This prevents alarm fatigue per FAA AC 25.1322-1 and ICAO Annex 6.
+  if (_voiceEnabled) {
+    let _shouldSpeak = false;
+    let _forceSpeak  = false;  // bypass repeat throttle
+
+    // EVENT 1: Risk level ESCALATED (new, worse situation)
+    if (_lvl === "CRITICAL" && _lastSpokenLevel !== "CRITICAL") {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+    if (_lvl === "HIGH" && (_lastSpokenLevel === null || _lastSpokenLevel === "MODERATE" || _lastSpokenLevel === "LOW")) {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+
+    // EVENT 2: Emergency descent detected (flight_state transition)
+    if (_flightState === "emergency_descent" && _prevFlightState !== "emergency_descent") {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+
+    // EVENT 3: No safe LZ — green reachable went from > 0 to 0 (critical new condition)
+    if (_prevGreenReach !== null && _prevGreenReach > 0 && _greenReach === 0) {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+
+    // EVENT 4: SIGMET entered zone for first time
+    if (_sigmetCount > 0 && _prevSigmetCount === 0) {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+
+    // EVENT 5: Ceiling suddenly dropped below 500 ft (IMC/approach emergency)
+    if (_ceilingFt !== null && _prevCeilingFt !== null && _ceilingFt < 500 && _prevCeilingFt >= 500) {
+      _shouldSpeak = true; _forceSpeak = true;
+    }
+
+    // REPEAT REMINDER: CRITICAL only — every 90s (not 30s), only if still critical
+    if (_lvl === "CRITICAL" && !_forceSpeak) {
+      if (_now - _lastSpeakTime > _VOICE_CRITICAL_REPEAT_MS) {
+        _shouldSpeak = true;
+      }
+    }
+
+    // HIGH: no repeat reminder — voice fires once on escalation, then silent
+    // (pilot is already aware; repeated "High risk" is alarm fatigue)
+
+    // Speak if triggered
+    if (_shouldSpeak) {
+      const vt = buildVoiceText(data);
+      if (vt) {
+        speakAlert(vt);
+        _lastSpokenLevel = _lvl;
+        _lastSpeakTime   = _now;
+      }
+    }
+  }
+
+  // Reset level tracker when risk drops back to safe
+  if (_lvl !== "CRITICAL" && _lvl !== "HIGH") {
+    _lastSpokenLevel = null;
+  }
+
+  // ── Update previous-state trackers (AFTER all event checks) ──────────────
+  _prevFlightState  = _flightState;
+  _prevGreenReach   = _greenReach;
+  _prevSigmetCount  = _sigmetCount;
+  _prevCeilingFt    = _ceilingFt;
+
+### D-4: Improve buildVoiceText() with actual vs_fpm and flight state
+
+Find the buildVoiceText() function and replace it entirely with:
+
+  function buildVoiceText(data) {
+    if (!data) return null;
+    const lvl      = data.risk?.level;
+    const opts     = data.options || [];
+    const primary  = opts.find(o => o.type === "PRIMARY") || opts[0];
+    const reach    = data.reachability || {};
+    const sigs     = data.sigmets || [];
+    const guide    = data.guidance || {};
+    const risk     = data.risk || {};
+    const ttg      = guide.time_to_ground_min;
+    const ttgStr   = (ttg && ttg < 999)
+      ? (ttg < 1 ? "less than 1 minute" : `${Math.round(ttg)} minutes`)
+      : null;
+    const agl      = guide.agl_ft ? Math.round(guide.agl_ft) : null;
+    const fState   = risk.flight_state;
+    const vsRisk   = risk.vs_risk || 0;
+
+    // Emergency descent — highest priority message
+    if (fState === "emergency_descent") {
+      let msg = "MAYDAY. Emergency descent detected. ";
+      if (agl)    msg += `${agl} feet above ground. `;
+      if (ttgStr) msg += `Estimated time to ground ${ttgStr}. `;
+      if (reach.green_reachable === 0) msg += "No safe landing zones in range. ";
+      if (primary?.bearing_deg != null)
+        msg += `Best option bearing ${Math.round(primary.bearing_deg / 10) * 10} degrees`;
+      if (primary?.distance_nm) msg += `, ${Math.round(primary.distance_nm)} miles.`;
+      return msg;
+    }
+
+    if (lvl === "CRITICAL") {
+      let msg = "Warning. Critical risk. ";
+      if (ttgStr) msg += `Time to ground ${ttgStr}. `;
+      if (agl)    msg += `${agl} feet above ground. `;
+      if (reach.green_reachable === 0) msg += "No safe zone in glide range. ";
+      if (sigs.length) msg += `SIGMET active: ${sigs[0].hazard}. `;
+      if (guide.vs_guidance) msg += guide.vs_guidance + " ";
+      if (primary?.bearing_deg != null)
+        msg += `Best option bearing ${Math.round(primary.bearing_deg / 10) * 10} degrees`;
+      if (primary?.distance_nm) msg += `, ${Math.round(primary.distance_nm)} miles`;
+      if (primary?.success_probability != null)
+        msg += `. Success ${Math.round(primary.success_probability * 100)} percent.`;
+      return msg;
+    }
+
+    if (lvl === "HIGH") {
+      let msg = "Caution. High risk. ";
+      if (sigs.length) msg += `SIGMET ${sigs[0].hazard} active. `;
+      if (ttgStr) msg += `Time to ground ${ttgStr}. `;
+      if (reach.green_reachable === 0) msg += "No safe zones in range. ";
+      msg += `Recommended heading ${guide.safe_heading_deg || "--"} degrees.`;
+      return msg;
+    }
+
+    // Emergency: green_reachable just went to zero (event trigger, any risk level)
+    if (reach.green_reachable === 0 && agl && agl < 10000) {
+      return `Alert. No safe landing zones within glide range. ${agl} feet above ground.`;
+    }
+
+    // SIGMET entered zone
+    if (sigs.length > 0) {
+      return `Weather alert. ${sigs[0].hazard} active in your area.`;
+    }
+
+    return null;
+  }
+
+---
+
+## STEP E — Add vs_fpm to the WS result dict in cloud_app/app.py
+
+The frontend needs the raw vs_fpm to compute vertical acceleration
+(rate of change of vs_fpm) for the event-based voice trigger.
+
+Find the result dict construction and add vs_fpm:
+  result = {
+      ...existing fields...
+      "urgency": guidance.get("urgency", "NORMAL"),
+      "vs_fpm_raw": state.get("vs_fpm", 0),   # ← ADD THIS LINE
+  }
+
+Then in main.js, update the _prevVsFpm tracker.
+Inside the draw() function, at the very end after the prevState updates, add:
+  _prevVsFpm = data.vs_fpm_raw ?? 0;
+
+---
+
+## STEP F — Verify requirements.txt
+
+Open requirements.txt and confirm it has exactly:
+  fastapi
+  uvicorn[standard]
+  websockets
+  httpx
+  numpy
+  jinja2
+  python-multipart
+
+The app does not need aiofiles (log_engine uses synchronous writes inside asyncio.Lock which is sufficient for single-process deployment).
+
+---
+
+## STEP G — Final startup test
+
+Run:
+  uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
+
+Expected: starts cleanly, no import errors, no assertion errors.
+
+Open the app in browser and verify:
+- Voice button starts as "Voice Off"
+- Risk grid appears within 3 seconds
+- TTG display shows in glide overlay
+- Voice does NOT speak during stable LOW/MODERATE flight
+- Voice DOES speak immediately when you manually drag vs_fpm to emergency descent values
