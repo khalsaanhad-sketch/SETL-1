@@ -1472,6 +1472,24 @@ function updateGlideOverlay(data) {
     `Glide ${data.glide_range_nm} nm  |  ` +
     `Reachable ${r.reachable_cells??'--'}/81  |  ` +
     `Safe reachable ${r.green_reachable??'--'}`;
+
+  const ttgEl = document.getElementById("ttgDisplay");
+  if (ttgEl && data.guidance) {
+    const ttg = data.guidance.time_to_ground_min;
+    const urg = data.urgency || "NORMAL";
+    if (ttg && ttg < 999) {
+      const ttgTxt = ttg < 1
+        ? "< 1 min"
+        : ttg < 60 ? `${ttg.toFixed(1)} min` : "> 60 min";
+      ttgEl.textContent = `TTG: ${ttgTxt}`;
+      ttgEl.style.color = urg === "IMMEDIATE" ? "#ba2627"
+                        : urg === "URGENT"    ? "#ff9c00"
+                        : "#2cb64f";
+    } else {
+      ttgEl.textContent = "TTG: --";
+      ttgEl.style.color = "";
+    }
+  }
 }
 
 async function showAnalytics() {

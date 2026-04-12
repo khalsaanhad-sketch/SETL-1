@@ -163,7 +163,10 @@ def generate_cells(state, terrain, prob, weather=None,
 
             # Per-cell terrain clearance: aircraft altitude above this cell's terrain
             cell_elev_m  = float(elev_grid[gi, gj]) if elev_grid is not None else elev
-            clearance_ft = round((state.get("altitude_ft", 5000) - cell_elev_m * 3.28084), 0)
+            _qnh_hpa = float((state.get("_qnh_hpa_cached") or 1013.25))
+            _pressure_corr = (_qnh_hpa - 1013.25) * 30.0
+            _true_alt_ft   = state.get("altitude_ft", 5000) + _pressure_corr
+            clearance_ft = round((_true_alt_ft - cell_elev_m * 3.28084), 0)
 
             return {
                 "corners":             corners,
@@ -596,6 +599,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                 slope_grid, roughness_grid, elev_grid = _dem
 
                 risk     = compute_risk(state, weather)
+                state["_qnh_hpa_cached"] = weather.get("qnh_hpa", 1013.25)
                 prob     = compute_probability(risk)
                 alerts   = compute_alerts(risk, prob, weather)
                 guidance = compute_guidance(state, terrain, weather)
@@ -708,6 +712,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "true_altitude_ft": risk.get("true_altitude_ft"),
                     "vs_risk":          risk.get("vs_risk", 0),
                     "ttg_scalar":       risk.get("ttg_scalar", 1.0),
+                    "urgency":          guidance.get("urgency", "NORMAL"),
                 }
 
                 # ── Pre-log derived fields ────────────────────────────────────
