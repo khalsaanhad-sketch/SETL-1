@@ -56,7 +56,7 @@ cloud_app/
 ## Frontend Features
 
 - **Night Mode**: Toggle dark cockpit-friendly theme
-- **Voice Alerts**: Event-based triggers (5 event types: risk escalation, emergency descent, green→0, SIGMET entry, ceiling drop); CRITICAL repeat 90s, HIGH no repeat; CRITICAL always overrides manual-off; auto-off after 12 safe ticks; MAYDAY message for emergency_descent flight_state
+- **Voice Alerts**: Event-based triggers (5 event types: risk escalation, emergency descent, green→0, SIGMET entry, ceiling drop); CRITICAL repeat 90s, HIGH no repeat; CRITICAL always overrides manual-off; auto-off after 12 safe ticks; MAYDAY message for emergency_descent; suppressed when data degraded; suppressed during normal cruise/landed/climbing flight states
 - **Glide Overlay**: Shows glide range, reachable/safe cell counts, TTG display with urgency color coding
 - **Degraded Banner**: Fixed top banner when terrain/weather data falls back to defaults
 - **LZ Persistence**: Last recommended PRIMARY landing zone persisted for 30s to prevent flicker
@@ -81,7 +81,7 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - CSV log columns include glide metrics, SIGMET data, and extended aircraft fields
 - Risk engine: U-shaped Gaussian speed_risk (optimal 130kts, stall+overspeed penalized), vs_fpm vertical speed risk (0.04–0.30), QNH pressure correction for true altitude, TTG time-to-ground scalar (1.0–1.40); grounded (alt≤100, spd≤60) early-returns LOW
 - NOTAM engine: 10-min spatial cache, detects CLOSED (−0.20 runway bonus) and CONTAMINATED (−0.10) airports
-- Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft)
+- Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft); minimum glide distance exclusion zone (3:1 steep descent ratio) prevents nose cells from being marked reachable
 - Weather engine: haversine station selection (not Euclidean), current UTC hour hourly index, QNH from METAR altimeter setting
 - Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost uses Gaussian bell curve (optimal 1.5nm, spread 3.0nm) for normalized [0,1] scoring; water crowd is BENEFIT (not cost)
 - Guidance engine: uses actual vs_fpm for time-to-ground (not hardcoded 500 fpm); urgency labels IMMEDIATE/URGENT/NORMAL based on TTG
