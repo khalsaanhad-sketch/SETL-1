@@ -142,7 +142,9 @@ def score_cells(cells: list) -> list:
             water_rows.append([dist, wind, crowd, slope])
         else:
             land_idx.append(idx)
-            dist_cost = abs(dist - 1.5) / max(dist + 0.01, 1.0)
+            _d_opt  = 1.5
+            _d_sig  = 3.0
+            dist_cost = 1.0 - math.exp(-0.5 * ((dist - _d_opt) / _d_sig) ** 2)
             land_rows.append([slope, rough, dist_cost, crowd, obst])
 
     if land_rows:

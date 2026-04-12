@@ -70,10 +70,13 @@ async def get_osm_crowd_grid(
     Returns (None, None) on Overpass failure — callers fall back to 0.0.
     """
     key = _grid_cache_key(lat, lon, cell_size)
+
     if _CROWD_CACHE["key"] == key and _CROWD_CACHE["crowd"] is not None:
         return _CROWD_CACHE["crowd"], _CROWD_CACHE["obstacle"]
 
-    # Mark this key as in-flight so the WS loop won't fire a second parallel request
+    if _CROWD_CACHE.get("pending") == key:
+        return None, None
+
     _CROWD_CACHE["pending"] = key
 
     dim  = 2 * steps + 1  # 9

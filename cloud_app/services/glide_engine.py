@@ -43,7 +43,8 @@ def compute_glide_range_nm(altitude_ft: float, glide_ratio: float,
                             best_glide_kts: float = 150.0) -> float:
     alt_nm      = max(0, altitude_ft) / 6076.12
     base_range  = alt_nm * glide_ratio
-    wind_factor = max(0.4, (best_glide_kts - headwind_kts) / best_glide_kts)
+    raw_factor  = (best_glide_kts - headwind_kts) / max(best_glide_kts, 1.0)
+    wind_factor = max(0.05, raw_factor)
     return round(base_range * wind_factor, 2)
 
 def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,

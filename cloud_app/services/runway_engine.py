@@ -157,14 +157,16 @@ async def get_nearby_runways(lat: float, lon: float, radius_km: int = 80) -> lis
     """
     global _OA_DB, _OA_LOADING
 
-    # ── Load OurAirports CSV on first call ────────────────────────────────────
-    if _OA_DB is None:
+    if _OA_DB is None and not _OA_LOADING:
+        _OA_LOADING = True
         try:
             _OA_DB = await _load_ourairports()
         except Exception:
-            _OA_DB = []    # treat download failure as empty → use Overpass
+            _OA_DB = []
         finally:
             _OA_LOADING = False
+    elif _OA_LOADING:
+        return await _fetch_overpass(lat, lon, radius_km)
 
     # ── Filter in-memory (instant) ────────────────────────────────────────────
     if _OA_DB:
