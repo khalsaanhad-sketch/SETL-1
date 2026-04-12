@@ -716,23 +716,28 @@ function draw(data) {
   const _sigmetCount  = (data.sigmets || []).length;
   const _ceilingFt    = data.weather?.ceiling_ft ?? null;
   const _now          = Date.now();
+  const _degraded     = _isDataDegraded();
+  const _normalFlight = (_flightState === "cruise" || _flightState === "landed" ||
+                         _flightState === "climbing");
 
-  if (_voiceEnabled) {
+  if (_voiceEnabled && !_degraded) {
     let _shouldSpeak = false;
     let _forceSpeak  = false;
 
-    if (_lvl === "CRITICAL" && _lastSpokenLevel !== "CRITICAL") {
-      _shouldSpeak = true; _forceSpeak = true;
-    }
-    if (_lvl === "HIGH" && (_lastSpokenLevel === null || _lastSpokenLevel === "MODERATE" || _lastSpokenLevel === "LOW")) {
-      _shouldSpeak = true; _forceSpeak = true;
+    if (!_normalFlight) {
+      if (_lvl === "CRITICAL" && _lastSpokenLevel !== "CRITICAL") {
+        _shouldSpeak = true; _forceSpeak = true;
+      }
+      if (_lvl === "HIGH" && (_lastSpokenLevel === null || _lastSpokenLevel === "MODERATE" || _lastSpokenLevel === "LOW")) {
+        _shouldSpeak = true; _forceSpeak = true;
+      }
     }
 
     if (_flightState === "emergency_descent" && _prevFlightState !== "emergency_descent") {
       _shouldSpeak = true; _forceSpeak = true;
     }
 
-    if (_prevGreenReach !== null && _prevGreenReach > 0 && _greenReach === 0) {
+    if (!_normalFlight && _prevGreenReach !== null && _prevGreenReach > 0 && _greenReach === 0) {
       _shouldSpeak = true; _forceSpeak = true;
     }
 
@@ -744,7 +749,7 @@ function draw(data) {
       _shouldSpeak = true; _forceSpeak = true;
     }
 
-    if (_lvl === "CRITICAL" && !_forceSpeak) {
+    if (_lvl === "CRITICAL" && !_normalFlight && !_forceSpeak) {
       if (_now - _lastSpeakTime > _VOICE_CRITICAL_REPEAT_MS) {
         _shouldSpeak = true;
       }
@@ -1159,9 +1164,31 @@ function _updateVoiceBtn() {
   btn.classList.toggle("voice-off", !_voiceEnabled);
 }
 
+function _isDataDegraded() {
+  if (!latestData) return false;
+  const conf = latestData.weather?.confidence;
+  const terrainLive = latestData.terrain?.elevation_live;
+  return (conf === "low") || (terrainLive === false && !!latestData.terrain);
+}
+
 function autoManageVoice() {
   if (!latestData) return;
   const lvl = latestData.risk?.level;
+  const degraded = _isDataDegraded();
+
+  const banner = document.getElementById("degradedBanner");
+  if (banner) banner.style.display = degraded ? "block" : "none";
+
+  if (degraded) {
+    if (_voiceEnabled && !_voiceManualOff) {
+      _voiceEnabled = false;
+      _lastSpokenLevel = null;
+      _lastSpeakTime   = 0;
+      window.speechSynthesis?.cancel();
+      _updateVoiceBtn();
+    }
+    return;
+  }
 
   if (lvl === "CRITICAL" && !_voiceEnabled) {
     _voiceEnabled   = true;
@@ -1186,12 +1213,6 @@ function autoManageVoice() {
   } else {
     _lowRiskTickCount = 0;
   }
-
-  const conf = latestData.weather?.confidence;
-  const terrainLive = latestData.terrain?.elevation_live;
-  const degraded = (conf === "low") || (terrainLive === false && latestData.terrain);
-  const banner = document.getElementById("degradedBanner");
-  if (banner) banner.style.display = degraded ? "block" : "none";
 }
 
 function setWsStatus(state) {
@@ -1442,9 +1463,9 @@ document.getElementById("voiceBtn").addEventListener("click", () => {
   _voiceManualOff = !_voiceEnabled;
   if (!_voiceEnabled) _lowRiskTickCount = 0;
   _updateVoiceBtn();
-  if (_voiceEnabled) {
+  if (_voiceEnabled && !_isDataDegraded()) {
     speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
-  } else {
+  } else if (!_voiceEnabled) {
     window.speechSynthesis?.cancel();
     _lastSpokenLevel = null;
     _lastSpeakTime   = 0;

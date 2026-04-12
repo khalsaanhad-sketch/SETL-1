@@ -53,6 +53,7 @@ def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
                      best_glide_kts: float = 150.0,
                      wind_speed_kts: float = 0.0,
                      wind_dir_deg: float = 0.0) -> list:
+    _STEEP_DESCENT_RATIO = 3.0
     R = 6371.0
     for cell in cells:
         c = cell.get("corners", [])
@@ -81,8 +82,11 @@ def apply_glide_mask(cells: list, ac_lat: float, ac_lon: float,
 
         max_nm = compute_glide_range_nm(altitude_ft, glide_ratio,
                                         cell_headwind, best_glide_kts)
+        agl_ft = max(0, cell.get("clearance_ft", altitude_ft))
+        min_dist_nm = agl_ft * _STEEP_DESCENT_RATIO / 6076.12
         margin  = round(max_nm - dist_nm, 2)
-        cell["reachable"]       = dist_nm <= max_nm
+        reachable = dist_nm <= max_nm and dist_nm >= min_dist_nm
+        cell["reachable"]       = reachable
         cell["glide_margin_nm"] = margin
     return cells
 
