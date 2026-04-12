@@ -20,6 +20,8 @@ def compute_probability(risk: dict) -> dict:
     overall = float(risk.get("overall", 0.5))
     overall = max(0.0, min(1.0, overall))
 
+    # k=8.0 for overall aircraft risk (sharper S-curve than per-cell k=5.0 in decision_engine).
+    # Intentional: overall risk needs a tighter decision boundary for go/no-go.
     k            = 8.0
     success_prob = round(1.0 / (1.0 + math.exp(k * (overall - 0.5))), 3)
     failure_prob = round(1.0 - success_prob, 3)

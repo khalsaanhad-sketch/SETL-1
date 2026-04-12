@@ -38,9 +38,13 @@ def compute_options(prob: dict, cells: list = None,
              "slope_deg":None,"reachable":None},
         ]
 
-    land   = [c for c in cells if not c.get("is_water",False)]
-    reach  = [c for c in land  if c.get("reachable",True)]
+    land   = [c for c in cells if not c.get("is_water", False)]
+    # Primary pool: reachable land cells only.
+    # Safety: a cell outside the glide envelope must NEVER be PRIMARY or SECONDARY.
+    reach  = [c for c in land if c.get("reachable", True)]
+    # Fallback 1: all land cells (if glide mask not yet applied, or all unreachable)
     pool   = reach if reach else land
+    # Fallback 2: water ditching (if no land at all)
 
     if not pool:
         water  = sorted(cells, key=lambda c: c.get("probability",0), reverse=True)
