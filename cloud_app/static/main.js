@@ -46,9 +46,13 @@ let selectedAcId     = null;
 let selectedAcMarker = null;
 let aircraftFeed     = [];
 let latestData            = null;
-let _voiceEnabled    = false;
-let _lastSpokenLevel = null;   // risk level that was last spoken aloud
-let _lastSpeakTime   = 0;      // monotonic time of last speech dispatch
+let _voiceEnabled      = false;
+let _lastSpokenLevel   = null;
+let _lastSpeakTime     = 0;
+let _voiceManualOff    = false;   // true ONLY when user explicitly clicked Voice Off
+let _persistedLZ       = null;    // last accepted PRIMARY landing zone
+let _persistedLZTs     = 0;       // timestamp when it was persisted
+const _LZ_PERSIST_MS   = 30000;   // persist for 30 s unless conditions materially change
 let _nightMode      = false;
 let _glideRangeNm   = 0;
 let _oskyAuthHeader       = null;   // set from /api/opensky-creds on init
@@ -687,8 +691,19 @@ function draw(data) {
   latestData = data;
 
   autoManageVoice();
-  // Only speak on risk-level change or at most every 30 s at the same serious level.
-  // This prevents the WS tick rate (1.5 s) from queuing continuous utterances.
+
+  const _primary = (data.options || []).find(o => o.type === "PRIMARY");
+  if (_primary && _primary.reachable) {
+    const _now = Date.now();
+    const _oldProb = _persistedLZ?.success_probability ?? 0;
+    const _newProb = _primary.success_probability ?? 0;
+    if (!_persistedLZ || (_now - _persistedLZTs > _LZ_PERSIST_MS) ||
+        (_newProb > _oldProb + 0.05)) {
+      _persistedLZ   = _primary;
+      _persistedLZTs = _now;
+    }
+  }
+
   const _lvl = data.risk?.level;
   if (_voiceEnabled && (_lvl === "CRITICAL" || _lvl === "HIGH")) {
     const _now        = Date.now();
@@ -1080,32 +1095,49 @@ function draw(data) {
 // ── WebSocket connection ───────────────────────────────────────────────────────
 let wsReconnectTimer = null;
 let _wsRetryDelay    = 1500;
-let _voiceManuallySet = false;
 let _lowRiskTickCount = 0;
 
+function _updateVoiceBtn() {
+  const btn = document.getElementById("voiceBtn");
+  if (!btn) return;
+  btn.textContent = _voiceEnabled ? "Voice On" : "Voice Off";
+  btn.classList.toggle("voice-on",  _voiceEnabled);
+  btn.classList.toggle("voice-off", !_voiceEnabled);
+}
+
 function autoManageVoice() {
-  if (_voiceManuallySet) return;
   if (!latestData) return;
   const lvl = latestData.risk?.level;
+
   if (lvl === "CRITICAL" || lvl === "HIGH") {
     _lowRiskTickCount = 0;
-    if (!_voiceEnabled) {
+
+    if (lvl === "CRITICAL" && !_voiceEnabled) {
+      _voiceEnabled  = true;
+      _voiceManualOff = false;
+      _updateVoiceBtn();
+    }
+
+    if (lvl === "HIGH" && !_voiceEnabled && !_voiceManualOff) {
       _voiceEnabled = true;
-      const btn = document.getElementById("voiceBtn");
-      btn.textContent = "Voice On";
-      btn.classList.add("voice-on");
-      btn.classList.remove("voice-off");
+      _updateVoiceBtn();
     }
   } else {
     _lowRiskTickCount++;
-    if (_lowRiskTickCount > 5 && _voiceEnabled) {
+    if (_lowRiskTickCount > 8 && _voiceEnabled && !_voiceManualOff) {
       _voiceEnabled = false;
-      const btn = document.getElementById("voiceBtn");
-      btn.textContent = "Voice Off";
-      btn.classList.add("voice-off");
-      btn.classList.remove("voice-on");
+      _lastSpokenLevel = null;
+      _lastSpeakTime   = 0;
+      window.speechSynthesis?.cancel();
+      _updateVoiceBtn();
     }
   }
+
+  const conf = latestData.weather?.confidence;
+  const terrainLive = latestData.terrain?.elevation_live;
+  const degraded = (conf === "low") || (terrainLive === false && latestData.terrain);
+  const banner = document.getElementById("degradedBanner");
+  if (banner) banner.style.display = degraded ? "block" : "none";
 }
 
 function setWsStatus(state) {
@@ -1352,19 +1384,15 @@ document.getElementById("trafficSearchBtn").addEventListener("click", () => draw
 document.getElementById("nightModeBtn").addEventListener("click", toggleNightMode);
 
 document.getElementById("voiceBtn").addEventListener("click", () => {
-  _voiceManuallySet = true;
   _voiceEnabled = !_voiceEnabled;
-  const btn = document.getElementById("voiceBtn");
-  btn.textContent = _voiceEnabled ? "Voice On" : "Voice Off";
-  btn.classList.toggle("voice-on",  _voiceEnabled);
-  btn.classList.toggle("voice-off", !_voiceEnabled);
+  _voiceManualOff = !_voiceEnabled;
+  if (!_voiceEnabled) _lowRiskTickCount = 0;
+  _updateVoiceBtn();
   if (_voiceEnabled) {
     speakAlert("Voice alerts activated. SETL Emergency Flight Bag ready.");
   } else {
-    // Cancel any utterance already queued or mid-speech — setting the flag
-    // alone does not stop the Web Speech API from finishing what it started.
     window.speechSynthesis?.cancel();
-    _lastSpokenLevel = null;   // reset so next voice-on speaks immediately
+    _lastSpokenLevel = null;
     _lastSpeakTime   = 0;
   }
   document.getElementById("appNotice").textContent =
@@ -1435,21 +1463,33 @@ function buildVoiceText(data) {
   const primary = opts.find(o => o.type === "PRIMARY") || opts[0];
   const reach   = data.reachability || {};
   const sigs    = data.sigmets || [];
+  const guide   = data.guidance || {};
+  const ttg     = guide.time_to_ground_min;
+  const ttgStr  = (ttg && ttg < 999)
+    ? (ttg < 1 ? "less than 1 minute" : `${Math.round(ttg)} minutes`)
+    : null;
+  const agl     = guide.agl_ft ? Math.round(guide.agl_ft) : null;
+
   if (lvl === "CRITICAL") {
     let msg = "Warning. Critical risk. ";
+    if (ttgStr) msg += `Time to ground ${ttgStr}. `;
+    if (agl)    msg += `Altitude ${agl} feet above ground. `;
     if (reach.green_reachable === 0) msg += "No safe zone within glide range. ";
     if (sigs.length) msg += `SIGMET active: ${sigs[0].hazard}. `;
+    if (guide.vs_guidance) msg += guide.vs_guidance + " ";
     if (primary?.bearing_deg != null)
-      msg += `Best option bearing ${primary.bearing_deg} degrees`;
+      msg += `Best option bearing ${Math.round(primary.bearing_deg / 10) * 10} degrees`;
     if (primary?.distance_nm)
-      msg += `, ${primary.distance_nm} nautical miles`;
-    msg += `. Success ${Math.round((primary?.success_probability||0)*100)} percent.`;
+      msg += `, ${Math.round(primary.distance_nm)} nautical miles`;
+    if (primary?.success_probability != null)
+      msg += `. Success ${Math.round(primary.success_probability * 100)} percent.`;
     return msg;
   }
   if (lvl === "HIGH") {
     let msg = "High risk. ";
     if (sigs.length) msg += `SIGMET ${sigs[0].hazard} active. `;
-    msg += `Prepare for emergency landing. Heading ${data.guidance?.safe_heading_deg||"--"} degrees.`;
+    if (ttgStr) msg += `Time to ground ${ttgStr}. `;
+    msg += `Prepare for emergency landing. Heading ${guide.safe_heading_deg || "--"} degrees.`;
     return msg;
   }
   return null;
