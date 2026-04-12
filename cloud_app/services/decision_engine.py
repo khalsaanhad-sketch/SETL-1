@@ -1,18 +1,29 @@
 """
 SETL Decision Engine — AHP → TOPSIS → Logistic pipeline.
 
-Replaces the linear risk formula in generate_cells() with a multi-criteria
-decision-making (MCDM) approach used in real emergency-landing research.
+LAND AHP WEIGHTS — Scientific validation sources:
+  slope     (0.35): Penn State HLZ AHP expert study; STANAG 2999 (NATO);
+                    ArcGIS HLZ Solution (ESRI); ERDC GOAT v1.0 (US Army 2021);
+                    MDPI Remote Sensing helicopter landing site study 2021.
+  roughness (0.22): US Army ERDC GOAT (2021) — "surface roughness is a KEY DISCRIMINATOR
+                    for site utility in complex terrain"; Jin et al. Transactions in GIS 2025.
+  distance  (0.15): Reachability handled by glide mask; secondary within reachable set.
+                    ENAC automated emergency landing selector (DASC 2022).
+  crowd     (0.20): NASA forced landing specs: "risk to civilian population" = #1 criterion;
+                    Di Donato & Atkins, AIAA Journal of Aerospace Information Systems;
+                    MDPI Drones 2025 contingency landing; arxiv 2026 airspace-aware landing.
+  obstacle  (0.08): ArcGIS HLZ (ESRI) — 3rd tier factor; Penn State HLZ study.
 
-Pipeline:
-  1. AHP weights  — domain-justified importance per criterion (land vs water)
-  2. TOPSIS       — ranks cells relative to ideal-best / ideal-worst
-  3. Logistic     — maps the TOPSIS score to a non-linear probability in [0,1]
-  4. Absolute floor — prevents genuinely safe terrain being marked dangerous
-     purely due to relative comparison against equally-safe neighbours
-  5. risk = 1 - probability
+WATER WEIGHTS — Scientific validation sources:
+  wind       (0.40): FAA AIM Section 6-3-3 — "sea conditions and wind = #1 ditching factor"
+  depth_risk (0.30): AOPA — "hypothermia claims ~50% of ditching victims"; shallow coastal
+                     water dramatically improves rescue time and survival probability.
+                     FAA AIM: "aim for shallow water" — primary spatial guidance for ditching.
+  distance   (0.20): Secondary; depth_risk carries the proximity-to-rescue signal.
+  crowd      (0.10): Maritime rescue proximity proxy. BENEFIT column — coastal crowd indicates
+                     rescue infrastructure proximity (opposite sign vs. land model).
 
-No changes to session management, WebSocket IDs, or any other engine.
+Pipeline: AHP weights → TOPSIS → Logistic (k=5) → absolute floor → risk = 1 − probability
 """
 
 import math
@@ -23,13 +34,14 @@ import numpy as np
 # Columns must match the order of features built in score_cells() below.
 # surface_score removed — it is derived from slope and would double-count it.
 
-# Land: [slope, roughness, distance, crowd, obstacle]
 _LAND_KEYS = ["slope", "roughness", "distance", "crowd", "obstacle"]
-_LAND_W    = [  0.38,      0.22,       0.18,     0.14,    0.08  ]
+_LAND_W    = [  0.35,      0.22,       0.15,     0.20,    0.08  ]
 
-# Water: [distance, wind, crowd, slope]
-_WATER_KEYS = ["distance", "wind", "crowd", "slope"]
-_WATER_W    = [   0.35,     0.30,   0.20,    0.15  ]
+_WATER_KEYS = ["distance", "wind", "crowd", "depth_risk"]
+_WATER_W    = [   0.20,     0.40,   0.10,     0.30     ]
+
+assert abs(sum(_LAND_W)  - 1.0) < 1e-9, f"LAND weights sum to {sum(_LAND_W)}, not 1.0"
+assert abs(sum(_WATER_W) - 1.0) < 1e-9, f"WATER weights sum to {sum(_WATER_W)}, not 1.0"
 
 
 # ── TOPSIS ─────────────────────────────────────────────────────────────────────
@@ -139,7 +151,8 @@ def score_cells(cells: list) -> list:
 
         if c.get("is_water"):
             water_idx.append(idx)
-            water_rows.append([dist, wind, crowd, slope])
+            depth_risk = float(c.get("depth_risk", 0.6))
+            water_rows.append([dist, wind, crowd, depth_risk])
         else:
             land_idx.append(idx)
             _d_opt  = 1.5
@@ -178,7 +191,7 @@ def score_cells(cells: list) -> list:
 
     if water_rows:
         scores = _topsis(np.array(water_rows, dtype=float), _WATER_W,
-                         cost_cols=[0, 1, 2, 3])
+                         cost_cols=[0, 1, 3])
         for rank, idx in enumerate(water_idx):
             prob = _logistic(float(scores[rank]))
             risk = round(1.0 - prob, 3)

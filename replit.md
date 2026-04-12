@@ -83,7 +83,7 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - NOTAM engine: 10-min spatial cache, detects CLOSED (−0.20 runway bonus) and CONTAMINATED (−0.10) airports
 - Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft)
 - Weather engine: haversine station selection (not Euclidean), current UTC hour hourly index, QNH from METAR altimeter setting
-- Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost uses Gaussian bell curve (optimal 1.5nm, spread 3.0nm) for normalized [0,1] scoring
+- Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost uses Gaussian bell curve (optimal 1.5nm, spread 3.0nm) for normalized [0,1] scoring; water crowd is BENEFIT (not cost)
 - Guidance engine: uses actual vs_fpm for time-to-ground (not hardcoded 500 fpm); urgency labels IMMEDIATE/URGENT/NORMAL based on TTG
 - Glide engine: wind_factor floor 0.05 (physics-based, not arbitrary 0.4)
 - Terrain engine: slope_source metadata ("surface_type_estimate" for single-point, gradient for grid)

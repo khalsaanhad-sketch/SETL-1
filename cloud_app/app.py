@@ -136,10 +136,34 @@ def generate_cells(state, terrain, prob, weather=None,
                 water_confidence = "unknown"
 
             crowd_val = round(float(crowd_grid[gi, gj]), 3) if crowd_grid is not None else 0.0
+            if elev_grid is not None:
+                _cell_elev = float(elev_grid[gi, gj])
+                if _cell_elev < -2000:
+                    _depth_risk = 1.0
+                elif _cell_elev < -200:
+                    _depth_risk = 0.6
+                elif _cell_elev < 0:
+                    _depth_risk = 0.2
+                else:
+                    _depth_risk = 0.0
+                _cell_depth = abs(_cell_elev) if _cell_elev < 0 else None
+            elif elevation_live and elev < 0:
+                _cell_elev = elev
+                if _cell_elev < -2000:
+                    _depth_risk = 1.0
+                elif _cell_elev < -200:
+                    _depth_risk = 0.6
+                else:
+                    _depth_risk = 0.2
+                _cell_depth = abs(_cell_elev)
+            else:
+                _depth_risk = 0.6
+                _cell_depth = None
             return {
                 "corners":            corners,
                 "is_water":           True,
-                "depth_m":            round(local_depth, 0) if local_depth is not None else None,
+                "depth_m":            round(_cell_depth, 0) if _cell_depth is not None else None,
+                "depth_risk":         round(_depth_risk, 2),
                 "water_confidence":   water_confidence,
                 "terrain_confidence": terrain_conf,
                 "weather_confidence": weather_conf,
