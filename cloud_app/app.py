@@ -87,7 +87,7 @@ def ensure_session(sid):
     return sessions[sid]
 
 
-def generate_cells(state, terrain, prob, weather=None,
+def generate_cells(state, terrain, _prob_unused=None, weather=None,
                    slope_grid=None, roughness_grid=None,
                    elev_grid=None,
                    crowd_grid=None, obstacle_grid=None):
@@ -758,6 +758,7 @@ async def ws_endpoint(ws: WebSocket, sid: str):
                     "vs_risk":          risk.get("vs_risk", 0),
                     "ttg_scalar":       risk.get("ttg_scalar", 1.0),
                     "urgency":          guidance.get("urgency", "NORMAL"),
+                    "vs_fpm_raw":       state.get("vs_fpm", 0),
                 }
 
                 # ── Pre-log derived fields ────────────────────────────────────

@@ -1,3 +1,5 @@
+import math
+
 def compute_risk(state: dict, weather: dict | None = None) -> dict:
     altitude    = state.get("altitude_ft", 5000)
     speed       = state.get("speed_kts", 100)
@@ -8,7 +10,7 @@ def compute_risk(state: dict, weather: dict | None = None) -> dict:
     pressure_corr_ft = (qnh_hpa - 1013.25) * 30.0
     true_altitude = altitude + pressure_corr_ft
 
-    if altitude <= 100 and speed <= 60:
+    if altitude <= 200 and speed <= 60:
         weather_risk = 0.0
         if weather:
             wind_kts      = weather.get("wind_speed_kts", 0.0)
@@ -30,7 +32,10 @@ def compute_risk(state: dict, weather: dict | None = None) -> dict:
         }
 
     altitude_risk = max(0.0, 1.0 - (max(true_altitude, 101) / 10000.0))
-    speed_risk    = min(1.0, speed / 300.0)
+    _spd_opt = 130.0
+    _spd_sig = 120.0
+    _spd_raw = 1.0 - math.exp(-0.5 * ((speed - _spd_opt) / _spd_sig) ** 2)
+    speed_risk = round(min(1.0, max(0.0, _spd_raw)), 3)
 
     base = round(altitude_risk * 0.6 + speed_risk * 0.4, 3)
 

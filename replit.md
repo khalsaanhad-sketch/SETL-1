@@ -56,7 +56,7 @@ cloud_app/
 ## Frontend Features
 
 - **Night Mode**: Toggle dark cockpit-friendly theme
-- **Voice Alerts**: Web Speech API with level-change gating (speaks on risk escalation or 30s repeat); CRITICAL always overrides manual-off; auto-off after 8 safe ticks with speechSynthesis.cancel(); `_voiceManualOff` flag tracks explicit user preference
+- **Voice Alerts**: Event-based triggers (5 event types: risk escalation, emergency descent, green→0, SIGMET entry, ceiling drop); CRITICAL repeat 90s, HIGH no repeat; CRITICAL always overrides manual-off; auto-off after 12 safe ticks; MAYDAY message for emergency_descent flight_state
 - **Glide Overlay**: Shows glide range, reachable/safe cell counts, TTG display with urgency color coding
 - **Degraded Banner**: Fixed top banner when terrain/weather data falls back to defaults
 - **LZ Persistence**: Last recommended PRIMARY landing zone persisted for 30s to prevent flicker
@@ -79,7 +79,7 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - Terrain engine returns 3-tuple: `(slope_grid, roughness_grid, elev_grid)` — all callers must destructure
 - Slope threshold: 15° (aviation standard), terrain clearance floors: <200ft→0.92, <500ft→0.72, <1000ft→0.46
 - CSV log columns include glide metrics, SIGMET data, and extended aircraft fields
-- Risk engine: vs_fpm vertical speed risk (0.04–0.30), QNH pressure correction for true altitude, TTG time-to-ground scalar (1.0–1.40)
+- Risk engine: U-shaped Gaussian speed_risk (optimal 130kts, stall+overspeed penalized), vs_fpm vertical speed risk (0.04–0.30), QNH pressure correction for true altitude, TTG time-to-ground scalar (1.0–1.40); grounded (alt≤100, spd≤60) early-returns LOW
 - NOTAM engine: 10-min spatial cache, detects CLOSED (−0.20 runway bonus) and CONTAMINATED (−0.10) airports
 - Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft)
 - Weather engine: haversine station selection (not Euclidean), current UTC hour hourly index, QNH from METAR altimeter setting
