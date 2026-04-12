@@ -112,6 +112,7 @@ async def get_terrain(lat: float, lon: float) -> dict:
     result = {
         "elevation_m":    round(elevation, 1),
         "slope_deg":      slope_deg,
+        "slope_source":   "surface_type_estimate",
         "surface_type":   surface_type,
         "is_water":       is_water,
         "landing_viable": landing_viable,
