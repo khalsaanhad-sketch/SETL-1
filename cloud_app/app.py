@@ -520,18 +520,39 @@ def create_session():
 _FLOAT_FIELDS = {"latitude","longitude","altitude_ft","speed_kts","heading_deg","vs_fpm"}
 _STR_FIELDS   = {"callsign","icao24","aircraft_type","aircraft_reg"}
 
+_FLOAT_BOUNDS = {
+    "latitude":    (-90.0,   90.0,   28.6),
+    "longitude":   (-180.0,  180.0,  77.2),
+    "altitude_ft": (0.0,     60000.0, 5000.0),
+    "speed_kts":   (0.0,     800.0,  100.0),
+    "heading_deg": (0.0,     360.0,  90.0),
+    "vs_fpm":      (-8000.0, 6000.0, 0.0),
+}
+
+def _clamp(val, lo, hi, default):
+    try:
+        v = float(val)
+        return v if lo <= v <= hi else default
+    except (TypeError, ValueError):
+        return default
+
 @app.post("/api/live-state/{sid}")
 async def update_state(sid: str, request: Request):
     data = await request.json()
     state = ensure_session(sid)
     for k, v in data.items():
         if k in _FLOAT_FIELDS:
-            try:
-                state[k] = float(v)
-            except (TypeError, ValueError):
-                pass
+            bounds = _FLOAT_BOUNDS.get(k)
+            if bounds:
+                state[k] = _clamp(v, bounds[0], bounds[1], bounds[2])
+            else:
+                try:
+                    state[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
         elif k in _STR_FIELDS:
-            state[k] = str(v)[:64]
+            sv = str(v or "")[:12]
+            state[k] = sv if sv.replace("-","").replace(" ","").isalnum() else ""
         elif k in ("forward_grid",):
             state[k] = v if isinstance(v, bool) else str(v).lower() not in ("false","0","no","")
     return {"ok": True}

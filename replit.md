@@ -56,8 +56,10 @@ cloud_app/
 ## Frontend Features
 
 - **Night Mode**: Toggle dark cockpit-friendly theme
-- **Voice Alerts**: Web Speech API alerts with auto-manage (auto-on for CRITICAL/HIGH, auto-off after 5 safe ticks)
-- **Glide Overlay**: Shows glide range, reachable/safe cell counts
+- **Voice Alerts**: Web Speech API with level-change gating (speaks on risk escalation or 30s repeat); CRITICAL always overrides manual-off; auto-off after 8 safe ticks with speechSynthesis.cancel(); `_voiceManualOff` flag tracks explicit user preference
+- **Glide Overlay**: Shows glide range, reachable/safe cell counts, TTG display with urgency color coding
+- **Degraded Banner**: Fixed top banner when terrain/weather data falls back to defaults
+- **LZ Persistence**: Last recommended PRIMARY landing zone persisted for 30s to prevent flicker
 - **SIGMET Banner**: Fixed top banner when SIGMETs affect area
 - **Analytics Modal**: Session stats, risk distribution, decision quality, anomalies
 - **Critical Pulse**: Panel border animation on CRITICAL risk level
@@ -81,6 +83,10 @@ uvicorn cloud_app.app:app --host 0.0.0.0 --port 5000
 - NOTAM engine: 10-min spatial cache, detects CLOSED (−0.20 runway bonus) and CONTAMINATED (−0.10) airports
 - Glide engine: per-cell bearing wind computation (each cell gets tailwind/headwind based on bearing from aircraft)
 - Weather engine: haversine station selection (not Euclidean), current UTC hour hourly index, QNH from METAR altimeter setting
-- Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost = |dist-1.5|/dist penalizes both too-close and too-far cells
+- Decision engine: TOPSIS uses explicit cost_cols parameter; dist_cost uses Gaussian bell curve (optimal 1.5nm, spread 3.0nm) for normalized [0,1] scoring
+- Guidance engine: uses actual vs_fpm for time-to-ground (not hardcoded 500 fpm); urgency labels IMMEDIATE/URGENT/NORMAL based on TTG
+- Glide engine: wind_factor floor 0.05 (physics-based, not arbitrary 0.4)
+- Terrain engine: slope_source metadata ("surface_type_estimate" for single-point, gradient for grid)
+- Input validation: /api/live-state applies bounds clamping on all numeric fields and character whitelisting on string fields
 - Session management: TTL eviction (1 hour), 500-session cap, input validation (float/string/bool whitelisting)
 - WebSocket reconnect: exponential backoff 1.5s → 30s cap (resets on successful open)
